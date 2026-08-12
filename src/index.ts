@@ -7,8 +7,11 @@ export {
   ToolNotFoundError,
 } from "./errors.ts";
 export {
+  DETERMINISTIC_KINDS,
+  deterministicEntries,
   Journal,
   journalUpToStep,
+  nestedKey,
   type DivergencePolicy,
   type EffectOutcome,
   type JournalEntry,

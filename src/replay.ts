@@ -1,5 +1,11 @@
 import { run, type RunOptions } from "./agent.ts";
-import { Journal, journalUpToStep, type DivergencePolicy, type JournalEntry } from "./journal.ts";
+import {
+  deterministicEntries,
+  Journal,
+  journalUpToStep,
+  type DivergencePolicy,
+  type JournalEntry,
+} from "./journal.ts";
 import { newRunId, RunStore } from "./store.ts";
 import type {
   AgentSpec,
@@ -101,9 +107,10 @@ export async function fork(parentRunId: string, options: ForkOptions): Promise<R
     throw new Error(`cannot fork "${parentRunId}": its log has no run.started event`);
   }
 
+  const recorded = effectsOf(parent);
   const entries: JournalEntry[] = Number.isFinite(options.atStep)
-    ? journalUpToStep(effectsOf(parent), options.atStep)
-    : effectsOf(parent).map((e, i) => ({ index: i, kind: e.kind, key: e.key, value: e.value }));
+    ? journalUpToStep(recorded, options.atStep)
+    : recorded.map((e, i) => ({ index: i, kind: e.kind, key: e.key, value: e.value }));
 
   const agent: AgentSpec = { ...started.agent, ...options.agent };
 
@@ -114,7 +121,11 @@ export async function fork(parentRunId: string, options: ForkOptions): Promise<R
     budget: options.budget ?? started.budget,
     store,
     runId: options.runId ?? newRunId("fork"),
-    journal: new Journal(entries, options.onDivergence ?? "strict"),
+    journal: new Journal(
+      entries,
+      options.onDivergence ?? "strict",
+      deterministicEntries(recorded),
+    ),
     forkedFrom: {
       runId: parentRunId,
       atStep: Number.isFinite(options.atStep) ? options.atStep : "all",

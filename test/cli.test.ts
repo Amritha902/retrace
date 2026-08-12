@@ -171,6 +171,32 @@ test("fork at step 0 replays nothing and takes the input from the log", async (t
   assert.doesNotMatch(io.text(), /replayed/);
 });
 
+test("replay reproduces a run whose tools stamped the time and an id", async (t) => {
+  const dir = tempDir(t);
+  const stamp = tool({
+    name: "stamp",
+    description: "File a record. Call this to record that something happened.",
+    inputSchema: objectSchema({}),
+    run: async (_input: unknown, ctx) => `${await ctx.now()} ${await ctx.uuid()}`,
+  });
+  await run("file it", {
+    agent,
+    provider: new MockProvider([
+      { content: [toolUse("t1", "stamp", {})] },
+      { content: [text("filed")] },
+    ]),
+    tools: [stamp],
+    store: new RunStore(dir),
+    runId: "stamped",
+  });
+
+  const io = capture();
+  assert.equal(await main(["replay", "stamped", "--dir", dir], io), 0, io.errors());
+  // model, tool, clock, uuid, model — the tool's reads are part of the log.
+  assert.match(io.text(), /reproduced 5 effects, identical/);
+  assert.match(io.text(), /replayed {2}clock {2}step:0#0:stamp\/clock:0/);
+});
+
 test("fork says which argument it is missing", async (t) => {
   const dir = tempDir(t);
   await record(dir);
@@ -224,9 +250,10 @@ test("show marks a fork's replayed prefix and its live steps apart", async (t) =
 
   const io = capture();
   assert.equal(await main(["show", forked, "--dir", dir], io), 0);
-  assert.match(io.text(), /replayed {2}model step:0/);
-  assert.match(io.text(), /replayed {2}tool {2}step:0#0:lookup/);
-  assert.match(io.text(), /live {6}model step:2/);
+  // The kind column is six wide so "random" lines up with the rest.
+  assert.match(io.text(), /replayed {2}model {2}step:0/);
+  assert.match(io.text(), /replayed {2}tool {3}step:0#0:lookup/);
+  assert.match(io.text(), /live {6}model {2}step:2/);
   assert.match(io.text(), /forked from baseline at step 2/);
 });
 

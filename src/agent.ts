@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
+
 import { Budget } from "./budget.ts";
 import { BudgetExceededError, ToolNotFoundError } from "./errors.ts";
-import { Journal } from "./journal.ts";
+import { Journal, nestedKey, type EffectOutcome } from "./journal.ts";
 import { newRunId, RunStore } from "./store.ts";
 import type {
   AgentSpec,
@@ -14,6 +16,7 @@ import type {
   RunResult,
   RunStatus,
   Tool,
+  ToolContext,
   UserBlock,
 } from "./types.ts";
 
@@ -118,7 +121,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
       emit({
         type: "effect",
         step,
-        index: journal.index - 1,
+        index: modelCall.index,
         kind: "model",
         key: `step:${step}`,
         value: response,
@@ -167,6 +170,8 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
         budget.countToolCall();
 
         const key = `step:${step}#${ordinal}:${call.name}`;
+        const journaled: RecordedEffect[] = [];
+        const context = toolContext(journal, step, key, journaled);
         const outcome = await journal.effect<{ content: string; isError: boolean }>(
           "tool",
           key,
@@ -174,7 +179,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
             try {
               const tool = toolsByName.get(call.name);
               if (!tool) throw new ToolNotFoundError(call.name, [...toolsByName.keys()]);
-              return { content: String(await tool.run(call.input)), isError: false };
+              return { content: String(await tool.run(call.input, context)), isError: false };
             } catch (cause) {
               // A failing or missing tool is information for the model, not a
               // crash for the run — hand the error back and let it recover.
@@ -186,13 +191,49 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
         emit({
           type: "effect",
           step,
-          index: journal.index - 1,
+          index: outcome.index,
           kind: "tool",
           key,
           value: outcome.value,
           replayed: outcome.replayed,
           durationMs: outcome.durationMs,
         });
+
+        // What the tool read from the journal, emitted after the tool's own
+        // event so the log shows the container before its contents. A replayed
+        // tool never ran and so asked for nothing; its reads are copied
+        // straight back out, because a replay is supposed to reproduce the log
+        // rather than a shorter version of it.
+        const reads = outcome.replayed
+          ? outcome.nested.map((e) => ({
+              kind: e.kind as RecordedEffect["kind"],
+              key: e.key,
+              value: e.value,
+              index: e.index,
+              replayed: true,
+              durationMs: 0,
+            }))
+          : journaled.map((e) => ({
+              kind: e.kind,
+              key: e.key,
+              value: e.outcome.value,
+              index: e.outcome.index,
+              replayed: e.outcome.replayed,
+              durationMs: e.outcome.durationMs,
+            }));
+
+        for (const read of reads) {
+          emit({
+            type: "effect",
+            step,
+            index: read.index,
+            kind: read.kind,
+            key: read.key,
+            value: read.value,
+            replayed: read.replayed,
+            durationMs: read.durationMs,
+          });
+        }
 
         results.push({
           type: "tool_result",
@@ -239,6 +280,46 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
     totals,
     events,
     ...(error === undefined ? {} : { error }),
+  };
+}
+
+interface RecordedEffect {
+  kind: "clock" | "uuid" | "random";
+  key: string;
+  outcome: EffectOutcome<unknown>;
+}
+
+/**
+ * The journal handed to a single tool call.
+ *
+ * Each read is keyed by the call it happened in and its ordinal within that
+ * call, so the same tool asking for the time twice gets two slots and a replay
+ * hands each one back the value it had. Adding a read shifts the ordinals after
+ * it — which is correct: that is a different tool, and it should get fresh
+ * values rather than inherit someone else's.
+ */
+function toolContext(
+  journal: Journal,
+  step: number,
+  ownerKey: string,
+  journaled: RecordedEffect[],
+): ToolContext {
+  const ordinals = new Map<string, number>();
+
+  const take = async <T>(kind: RecordedEffect["kind"], execute: () => T): Promise<T> => {
+    const ordinal = ordinals.get(kind) ?? 0;
+    ordinals.set(kind, ordinal + 1);
+    const key = nestedKey(ownerKey, kind, ordinal);
+    const outcome = await journal.deterministic<T>(kind, key, execute);
+    journaled.push({ kind, key, outcome });
+    return outcome.value;
+  };
+
+  return {
+    step,
+    now: () => take("clock", () => Date.now()),
+    uuid: () => take("uuid", () => randomUUID()),
+    random: () => take("random", () => Math.random()),
   };
 }
 

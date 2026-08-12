@@ -142,7 +142,7 @@ function printEvent(io: Io, event: RetraceEvent): void {
     case "effect": {
       const tag = padLabel(event.replayed ? green("replayed") : yellow("live"), 9);
       const timing = event.replayed ? "" : dim(` ${event.durationMs}ms`);
-      io.out(`  ${tag} ${event.kind.padEnd(5)} ${dim(event.key)}${timing}\n`);
+      io.out(`  ${tag} ${event.kind.padEnd(6)} ${dim(event.key)}${timing}\n`);
       if (event.kind === "tool") {
         const v = event.value as { content?: string; isError?: boolean };
         io.out(`        ${v.isError ? red("error") : dim("→")} ${truncate(v.content ?? "", 120)}\n`);

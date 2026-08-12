@@ -52,12 +52,28 @@ export interface ToolSchema {
   inputSchema: Record<string, unknown>;
 }
 
+/**
+ * The journal, as a tool sees it. Time, ids and randomness taken from here are
+ * recorded and come back unchanged on a replay or a fork; `Date.now()` and
+ * `Math.random()` called directly are still just the clock and the RNG.
+ */
+export interface ToolContext {
+  /** Which step of the run this call belongs to. */
+  readonly step: number;
+  /** Wall clock in epoch milliseconds. */
+  now(): Promise<number>;
+  /** A version 4 UUID. */
+  uuid(): Promise<string>;
+  /** A float in [0, 1). */
+  random(): Promise<number>;
+}
+
 export interface Tool extends ToolSchema {
   /**
    * Executed only when the journal has no recorded result for this call.
    * Must return something JSON-serializable — the return value goes in the log.
    */
-  run(input: any): Promise<string> | string;
+  run(input: any, context: ToolContext): Promise<string> | string;
 }
 
 export interface ModelRequest {

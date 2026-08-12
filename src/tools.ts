@@ -1,4 +1,4 @@
-import type { Tool } from "./types.ts";
+import type { Tool, ToolContext } from "./types.ts";
 
 export interface ToolDefinition<I> {
   name: string;
@@ -9,7 +9,8 @@ export interface ToolDefinition<I> {
    */
   description: string;
   inputSchema: Record<string, unknown>;
-  run(input: I): Promise<string> | string;
+  /** `context` is the journal: take time, ids and randomness from it to keep them replayable. */
+  run(input: I, context: ToolContext): Promise<string> | string;
 }
 
 /** Define a tool. Thin by design — a tool is a name, a schema, and a function. */

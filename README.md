@@ -105,6 +105,38 @@ const again = await replay(result.runId, { provider, tools: [search] });
 // Reaches neither the model nor the tools. Same output, $0.
 ```
 
+## Time, ids and randomness
+
+A tool's second argument is the journal. Anything taken from it is recorded and
+comes back unchanged later:
+
+```ts
+run: async ({ amount }, ctx) => {
+  const id = await ctx.uuid();   // step:2#0:charge/uuid:0
+  const at = await ctx.now();    // step:2#0:charge/clock:0
+  return `${id} charged ${amount} at ${at}`;
+},
+```
+
+These resolve differently from model and tool calls, on purpose. A model call is
+part of the *shape* of a run, so it is served by position and a mismatch is a
+`DivergenceError`. A timestamp is not part of the shape — nothing downstream
+cares what it is, only that it doesn't move. So clock, uuid and random reads are
+keyed by the call they happened in, and **the key table outlives the fork point**:
+
+```
+retrace fork demo-original --at 3 --module ./agent-module.ts
+```
+
+Steps 0–2 replay whole. Step 4 runs live — and if its tool calls `ctx.now()`, it
+gets the timestamp the parent recorded at that same slot, not today's clock. The
+fork differs from its parent in the thing you changed and nothing else, which is
+what makes `retrace diff` worth reading. A slot the parent never filled — a tool
+call the fork invented — gets a fresh value.
+
+`Date.now()` and `Math.random()` called directly are still just the clock and the
+RNG. The journal only covers what you take from it.
+
 ## Budgets
 
 Limits are enforced by the scheduler, so running out is a terminal state with a log entry — not an exception from somewhere inside a tool call.
@@ -179,12 +211,13 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 
 - **Tool side effects are real.** A replayed tool call returns the recorded result without executing, which is the point — but a fork that goes live past a `send_email` tool will send the email again. Gate irreversible tools yourself.
 - **Tools run sequentially**, in the order the model requested them. Parallel execution would still record deterministically, but the side-effect ordering wouldn't be, so it isn't the default.
-- **Clock and randomness inside your tools are not journaled.** Only the tool's *return value* is. A tool that returns `Date.now()` replays fine; a tool that branches on the clock internally may take a different path when it goes live.
+- **Clock and randomness are journaled only if you take them from the tool context.** `ctx.now()`, `ctx.uuid()` and `ctx.random()` are recorded and stable; a tool that calls `Date.now()` directly still reads the real clock and may branch differently when it goes live.
+- **Deterministic values are matched by slot, not by meaning.** A fork that reaches `step:4#0:search` gets whatever the parent recorded at `step:4#0:search`, even if the fork's step 4 is asking a different question. For a timestamp that is the point; if your tool derives something load-bearing from `ctx.random()`, know that it is keyed by position in the run.
 - **Changing `input` on a fork with `atStep > 0` does nothing for the replayed steps** — those model calls come from the log, which was produced with the old input. Fork at 0 to change the input.
 
 ## Status
 
-Early. The core — journal, agent loop, fork, replay, budgets, store, CLI — is covered by 52 tests that run without network access.
+Early. The core — journal, agent loop, fork, replay, budgets, store, CLI, and the clock/uuid/random effects — is covered by 62 tests that run without network access.
 
 The `AnthropicProvider` adapter now has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, and the byte-for-byte `raw` passthrough that signed thinking blocks depend on. It is still **not verified against the live API from this repo**: the integration test that does that — `[live]` in `test/anthropic.test.ts` — skips itself when `ANTHROPIC_API_KEY` is unset, which is how it has run so far. Set a key and run it to close that gap.
 
@@ -192,7 +225,7 @@ The `AnthropicProvider` adapter now has tests behind it. Against a stub client, 
 
 ```bash
 npm install
-npm test           # 52 tests, no network, no API key
+npm test           # 62 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, one more runs against the live API
 npm run typecheck
 npm run build
