@@ -131,9 +131,41 @@ retrace ls                    # every run, with cost and what replay saved
 retrace show <run-id>         # the timeline, marking each effect live or replayed
 retrace cost <run-id>         # per-step spend
 retrace diff <run-a> <run-b>  # where two runs stopped agreeing
+retrace replay <run-id>       # re-run it from the log and check it reproduces
+retrace fork <run-id> --at N  # replay the steps below N, then run live
 ```
 
 `diff` is the one to reach for after a fork — it shows exactly which effect the two runs stopped sharing.
+
+### Re-running from the command line
+
+`replay` needs nothing but the log. It re-runs the recorded loop, reaches neither the model nor your tools, and then compares what came out against what went in:
+
+```
+$ retrace replay demo-original
+...
+new run replay_20260812163416_838c0f5e
+reproduced 7 effects, identical · $0.9200 not spent
+```
+
+It exits non-zero if the replay diverged, ended differently, or ran past the end of the log — so it works as a regression check on the loop itself.
+
+`fork` has to execute the steps above the fork point, and a log cannot hold a running tool. `--module` supplies that half; everything else — input, model, budget — comes from the recorded run:
+
+```ts
+// agent-module.ts
+export const tools = [search];
+export const provider = new AnthropicProvider();
+export const agent = { system: "You are a research analyst. Answer in ten words." };
+```
+
+```bash
+retrace fork demo-original --at 3 --module ./agent-module.ts
+```
+
+Named exports and a `default` object both work. The file is imported for its exports, so it must not run anything at import time — see `examples/research.ts`, which guards its runner behind an entry-point check for exactly that reason. `--module` is optional for `replay`, and only matters there if the log stops short of the run it recorded.
+
+Add `--on-divergence live` to either command to treat a log that disagrees with the loop as the fork point rather than an error.
 
 ## Storage
 
@@ -152,7 +184,7 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 
 ## Status
 
-Early. The core — journal, agent loop, fork, replay, budgets, store, CLI — is covered by 39 tests that run without network access.
+Early. The core — journal, agent loop, fork, replay, budgets, store, CLI — is covered by 52 tests that run without network access.
 
 The `AnthropicProvider` adapter now has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, and the byte-for-byte `raw` passthrough that signed thinking blocks depend on. It is still **not verified against the live API from this repo**: the integration test that does that — `[live]` in `test/anthropic.test.ts` — skips itself when `ANTHROPIC_API_KEY` is unset, which is how it has run so far. Set a key and run it to close that gap.
 
@@ -160,7 +192,7 @@ The `AnthropicProvider` adapter now has tests behind it. Against a stub client, 
 
 ```bash
 npm install
-npm test           # 39 tests, no network, no API key
+npm test           # 52 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, one more runs against the live API
 npm run typecheck
 npm run build

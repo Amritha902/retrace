@@ -13,6 +13,7 @@ export {
   type EffectOutcome,
   type JournalEntry,
 } from "./journal.ts";
+export { loadRunModule, type RunModule } from "./module.ts";
 export { formatUsd, getRate, priceUsage, setRate, type RateCard } from "./pricing.ts";
 export { AnthropicProvider, type AnthropicProviderOptions } from "./providers/anthropic.ts";
 export { MockProvider, text, toolUse, type ScriptedTurn } from "./providers/mock.ts";
