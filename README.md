@@ -165,6 +165,7 @@ retrace cost <run-id>         # per-step spend
 retrace diff <run-a> <run-b>  # where two runs stopped agreeing
 retrace replay <run-id>       # re-run it from the log and check it reproduces
 retrace fork <run-id> --at N  # replay the steps below N, then run live
+retrace report <run-id>       # write the run as one self-contained HTML page
 ```
 
 `diff` is the one to reach for after a fork — it shows exactly which effect the two runs stopped sharing.
@@ -199,6 +200,23 @@ Named exports and a `default` object both work. The file is imported for its exp
 
 Add `--on-divergence live` to either command to treat a log that disagrees with the loop as the fork point rather than an error.
 
+### The run as a page
+
+`report` turns a log into one HTML file — every effect, what each tool was called
+with and what it returned, what a tool read from the clock, and where the money
+went:
+
+```bash
+retrace report demo-forked -o trace.html   # or -o - to pipe it somewhere
+```
+
+There is no JavaScript in it, nothing is fetched from the network, and it reads
+in a light or a dark browser. Replayed effects are green and live ones are rust,
+which in a fork makes the shape of the thing obvious at a glance: a long calm
+prefix, then the step you changed. The page is built from the log and nothing
+else, so it renders the same on any machine, and rendering the same log twice
+gives you the same bytes.
+
 ## Storage
 
 Runs are JSONL under `.retrace/runs/<run-id>.jsonl`, one event per line, appended synchronously. If the process dies mid-run the log is still a truthful prefix, and a truthful prefix is enough to fork from. `MemoryStore` is the same interface with nothing on disk.
@@ -217,7 +235,7 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 
 ## Status
 
-Early. The core — journal, agent loop, fork, replay, budgets, store, CLI, and the clock/uuid/random effects — is covered by 62 tests that run without network access.
+Early. The core — journal, agent loop, fork, replay, budgets, store, CLI, the clock/uuid/random effects, and the HTML report — is covered by 76 tests that run without network access.
 
 The `AnthropicProvider` adapter now has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, and the byte-for-byte `raw` passthrough that signed thinking blocks depend on. It is still **not verified against the live API from this repo**: the integration test that does that — `[live]` in `test/anthropic.test.ts` — skips itself when `ANTHROPIC_API_KEY` is unset, which is how it has run so far. Set a key and run it to close that gap.
 
@@ -225,7 +243,7 @@ The `AnthropicProvider` adapter now has tests behind it. Against a stub client, 
 
 ```bash
 npm install
-npm test           # 62 tests, no network, no API key
+npm test           # 76 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, one more runs against the live API
 npm run typecheck
 npm run build

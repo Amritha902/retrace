@@ -25,10 +25,12 @@ export {
   fork,
   inspect,
   replay,
+  summarize,
   type ForkOptions,
   type ReplayOptions,
   type RunSummary,
 } from "./replay.ts";
+export { renderReport } from "./report.ts";
 export { DEFAULT_STORE_DIR, MemoryStore, RunStore, fingerprint, newRunId } from "./store.ts";
 export { objectSchema, tool, type ToolDefinition } from "./tools.ts";
 export type * from "./types.ts";

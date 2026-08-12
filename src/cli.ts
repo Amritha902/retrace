@@ -1,8 +1,10 @@
 #!/usr/bin/env node
+import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { loadRunModule, type RunModule } from "./module.ts";
 import { formatUsd } from "./pricing.ts";
-import { effectsOf, fork, inspect, replay } from "./replay.ts";
+import { effectsOf, fork, inspect, replay, summarize } from "./replay.ts";
+import { renderReport } from "./report.ts";
 import { DEFAULT_STORE_DIR, RunStore } from "./store.ts";
 import type { ContentBlock, Provider, RetraceEvent } from "./types.ts";
 
@@ -14,10 +16,13 @@ const USAGE = `retrace — inspect and re-run recorded agent runs
   retrace diff <run-a> <run-b>  compare two runs step by step
   retrace replay <run-id>       re-run it from the log, and check it reproduces
   retrace fork <run-id> --at N  replay the steps below N, then run live
+  retrace report <run-id>       write the run as one self-contained HTML page
 
 Options
   --dir <path>              store directory (default: ${DEFAULT_STORE_DIR})
   --at <n>                  first step a fork executes for real
+  -o, --out <path>          where report writes its HTML; "-" for stdout
+                            (default: <run-id>.html)
   --module <path>           module exporting the live half of the run — tools,
                             a provider, and agent fields to override. Required
                             by fork; replay only needs it to go past the log.
@@ -60,6 +65,7 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
   const dir = takeOption(args, "--dir") ?? DEFAULT_STORE_DIR;
   const modulePath = takeOption(args, "--module");
   const atRaw = takeOption(args, "--at");
+  const out = takeOption(args, "-o") ?? takeOption(args, "--out");
   const onDivergence = readPolicy(takeOption(args, "--on-divergence"));
 
   const [command, ...rest] = args;
@@ -78,6 +84,8 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       return cmdReplay(io, store, rest[0], modulePath, onDivergence);
     case "fork":
       return cmdFork(io, store, rest[0], atRaw, modulePath, onDivergence);
+    case "report":
+      return cmdReport(io, store, rest[0], out);
     case undefined:
     case "-h":
     case "--help":
@@ -328,6 +336,43 @@ async function cmdFork(
     io.out(green(`the replayed prefix saved ${formatUsd(result.totals.savedUsd)}\n`));
   }
   return result.status === "failed" ? 1 : 0;
+}
+
+/**
+ * The log as a page you can send someone. Everything comes out of the log, so
+ * this reaches neither the network nor a module — a report of a run recorded on
+ * another machine renders exactly the same here.
+ */
+function cmdReport(
+  io: Io,
+  store: RunStore,
+  runId: string | undefined,
+  out: string | undefined,
+): number {
+  if (!runId) return fail(io, "report needs a run id");
+
+  const events = store.read(runId);
+  const summary = summarize(runId, events);
+  const html = renderReport(summary, events);
+
+  if (out === "-") {
+    io.out(html);
+    return 0;
+  }
+
+  const path = out ?? `${runId}.html`;
+  writeFileSync(path, html, "utf8");
+
+  const effects = effectsOf(events);
+  const replayed = effects.filter((e) => e.replayed).length;
+  io.out(`${bold(runId)} ${dim("→")} ${path}\n`);
+  io.out(
+    dim(
+      `${summary.steps} steps · ${effects.length} effects` +
+        `${replayed > 0 ? `, ${replayed} replayed` : ""} · ${(html.length / 1024).toFixed(0)}KB, no external assets\n`,
+    ),
+  );
+  return 0;
 }
 
 /**

@@ -35,7 +35,11 @@ export interface RunSummary {
 
 /** Read a run's log back without executing anything. */
 export function inspect(runId: string, store: RunStore = new RunStore()): RunSummary {
-  const events = store.read(runId);
+  return summarize(runId, store.read(runId));
+}
+
+/** The same summary, from events already in hand. */
+export function summarize(runId: string, events: readonly RetraceEvent[]): RunSummary {
   const started = events.find((e) => e.type === "run.started");
   if (!started || started.type !== "run.started") {
     throw new Error(`run "${runId}" has no run.started event — the log is truncated or not a run`);

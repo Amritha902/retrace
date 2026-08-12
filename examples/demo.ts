@@ -103,4 +103,7 @@ const saving = 1 - forked.totals.billedUsd / original.totals.billedUsd;
 console.log(
   `Retrying the last step cost ${(saving * 100).toFixed(0)}% less than re-running from scratch.`,
 );
-console.log("\nNow try:  npx retrace show demo-forked   ·   npx retrace diff demo-original demo-forked");
+console.log(
+  "\nNow try:  npx retrace show demo-forked   ·   npx retrace diff demo-original demo-forked" +
+    "\n          npx retrace report demo-forked -o trace.html",
+);
