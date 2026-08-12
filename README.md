@@ -152,13 +152,16 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 
 ## Status
 
-Early. The core — journal, agent loop, fork, replay, budgets, store, CLI — is covered by 29 tests that run without network access. The `AnthropicProvider` adapter is **not yet exercised against the live API**; it is written against the current Messages API (adaptive thinking, `effort`, server-side refusal fallbacks) but has no integration test behind it. Treat that one file as unverified until it is.
+Early. The core — journal, agent loop, fork, replay, budgets, store, CLI — is covered by 39 tests that run without network access.
+
+The `AnthropicProvider` adapter now has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, and the byte-for-byte `raw` passthrough that signed thinking blocks depend on. It is still **not verified against the live API from this repo**: the integration test that does that — `[live]` in `test/anthropic.test.ts` — skips itself when `ANTHROPIC_API_KEY` is unset, which is how it has run so far. Set a key and run it to close that gap.
 
 ## Development
 
 ```bash
 npm install
-npm test           # 29 tests, no network, no API key
+npm test           # 39 tests, no network, no API key
+                   # with ANTHROPIC_API_KEY set, one more runs against the live API
 npm run typecheck
 npm run build
 node examples/demo.ts   # the whole pitch, scripted, no API key
