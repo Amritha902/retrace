@@ -130,7 +130,7 @@ export class Journal {
     execute: () => Promise<T> | T,
   ): Promise<EffectOutcome<T>> {
     const index = this.cursor++;
-    const recorded = this.keyed.get(`${kind}:${key}`);
+    const recorded = this.recall(kind, key);
     if (recorded !== undefined) {
       return { index, value: recorded as T, replayed: true, durationMs: 0, nested: [] };
     }
@@ -138,6 +138,16 @@ export class Journal {
     const startedAt = Date.now();
     const value = await execute();
     return { index, value, replayed: false, durationMs: Date.now() - startedAt, nested: [] };
+  }
+
+  /**
+   * The recorded value for a deterministic key, or undefined if there isn't
+   * one. `deterministic` is the way in; this exists for a caller that has to
+   * resolve a read *before* it can claim a slot for it — parallel tool calls,
+   * which execute in one order and are journaled in another.
+   */
+  recall(kind: (typeof DETERMINISTIC_KINDS)[number], key: string): unknown {
+    return this.keyed.get(`${kind}:${key}`);
   }
 
   /**

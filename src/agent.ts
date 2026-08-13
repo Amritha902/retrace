@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { Budget } from "./budget.ts";
 import { BudgetExceededError, ToolNotFoundError } from "./errors.ts";
-import { Journal, nestedKey, type EffectOutcome } from "./journal.ts";
+import { DETERMINISTIC_KINDS, Journal, nestedKey, type EffectOutcome } from "./journal.ts";
 import { newRunId, RunStore } from "./store.ts";
 import type {
   AgentSpec,
@@ -49,6 +49,7 @@ export function defineAgent(spec: Partial<AgentSpec> & { name: string }): AgentS
     maxTokens: 16_000,
     thinking: "adaptive",
     effort: "high",
+    parallelTools: false,
     ...spec,
   };
 }
@@ -189,29 +190,14 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
       }
 
       const results: UserBlock[] = [];
-      for (const [ordinal, call] of toolUses.entries()) {
-        budget.checkToolCall();
-        budget.countToolCall();
 
-        const key = `step:${step}#${ordinal}:${call.name}`;
-        const journaled: RecordedEffect[] = [];
-        const context = toolContext(journal, step, key, journaled);
-        const outcome = await journal.effect<{ content: string; isError: boolean }>(
-          "tool",
-          key,
-          async () => {
-            try {
-              const tool = toolsByName.get(call.name);
-              if (!tool) throw new ToolNotFoundError(call.name, [...toolsByName.keys()]);
-              return { content: String(await tool.run(call.input, context)), isError: false };
-            } catch (cause) {
-              // A failing or missing tool is information for the model, not a
-              // crash for the run — hand the error back and let it recover.
-              return { content: describe(cause), isError: true };
-            }
-          },
-        );
-
+      /** The tool's own effect, then whatever it read while it ran. */
+      const emitToolCall = (
+        key: string,
+        outcome: EffectOutcome<ToolResult>,
+        durationMs: number,
+        reads: readonly RecordedRead[],
+      ): void => {
         emit({
           type: "effect",
           step,
@@ -220,32 +206,10 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
           key,
           value: outcome.value,
           replayed: outcome.replayed,
-          durationMs: outcome.durationMs,
+          durationMs,
         });
-
-        // What the tool read from the journal, emitted after the tool's own
-        // event so the log shows the container before its contents. A replayed
-        // tool never ran and so asked for nothing; its reads are copied
-        // straight back out, because a replay is supposed to reproduce the log
-        // rather than a shorter version of it.
-        const reads = outcome.replayed
-          ? outcome.nested.map((e) => ({
-              kind: e.kind as RecordedEffect["kind"],
-              key: e.key,
-              value: e.value,
-              index: e.index,
-              replayed: true,
-              durationMs: 0,
-            }))
-          : journaled.map((e) => ({
-              kind: e.kind,
-              key: e.key,
-              value: e.outcome.value,
-              index: e.outcome.index,
-              replayed: e.outcome.replayed,
-              durationMs: e.outcome.durationMs,
-            }));
-
+        // After the tool's own event, so the log shows the container before its
+        // contents.
         for (const read of reads) {
           emit({
             type: "effect",
@@ -258,13 +222,90 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
             durationMs: read.durationMs,
           });
         }
+      };
 
-        results.push({
-          type: "tool_result",
-          toolUseId: call.id,
-          content: outcome.value.content,
-          ...(outcome.value.isError ? { isError: true } : {}),
-        });
+      const runOne = async (ordinal: number, call: ToolUse): Promise<void> => {
+        const key = toolKey(step, ordinal, call.name);
+        const journaled: RecordedRead[] = [];
+        const context = journaledContext(journal, step, key, journaled);
+        const outcome = await journal.effect<ToolResult>("tool", key, () =>
+          invoke(toolsByName, call, context),
+        );
+
+        emitToolCall(
+          key,
+          outcome,
+          outcome.durationMs,
+          // A replayed tool never ran and so asked for nothing; its reads are
+          // copied straight back out, because a replay is supposed to reproduce
+          // the log rather than a shorter version of it.
+          outcome.replayed ? replayedReads(outcome) : journaled,
+        );
+        results.push(toolResult(call, outcome.value));
+      };
+
+      /**
+       * The same, for several calls at once.
+       *
+       * Two phases, and the split is the whole trick. The bodies run
+       * concurrently against a detached view of the journal — reads resolve by
+       * key, and a key does not depend on who reached it first — and then the
+       * results are committed through `journal.effect` in the order the model
+       * asked for them. What lands in the log is what a sequential step would
+       * have written, slot for slot; only the execution overlapped.
+       */
+      const runAtOnce = async (from: number, calls: readonly ToolUse[]): Promise<void> => {
+        const executed = await Promise.all(
+          calls.map(async (call, i) => {
+            const key = toolKey(step, from + i, call.name);
+            const reads: DetachedRead[] = [];
+            const context = detachedContext(journal, step, key, reads);
+            const startedAt = Date.now();
+            const value = await invoke(toolsByName, call, context);
+            return { key, value, reads, durationMs: Date.now() - startedAt };
+          }),
+        );
+
+        for (const [i, done] of executed.entries()) {
+          const outcome = await journal.effect<ToolResult>("tool", done.key, () => done.value);
+          const journaled: RecordedRead[] = [];
+          for (const read of done.reads) {
+            const committed = await journal.deterministic(read.kind, read.key, () => read.value);
+            journaled.push({ kind: read.kind, key: read.key, ...committed });
+          }
+          emitToolCall(done.key, outcome, done.durationMs, journaled);
+          results.push(toolResult(calls[i]!, outcome.value));
+        }
+      };
+
+      // A call the log can serve does not execute, so there is nothing to
+      // overlap — and the log's order is the only order it has. Parallelism is
+      // for the live tail, which in a plain run is the whole step and in a fork
+      // is whatever sits above the fork point.
+      let ordinal = 0;
+      while (ordinal < toolUses.length && journal.isReplaying) {
+        budget.checkToolCall();
+        budget.countToolCall();
+        await runOne(ordinal, toolUses[ordinal]!);
+        ordinal++;
+      }
+
+      const live = toolUses.slice(ordinal);
+      if (agent.parallelTools && live.length > 1) {
+        // Charged before any of them starts: a batch that would run out of
+        // budget halfway is refused whole, rather than leaving the log holding
+        // part of a step that never finished.
+        for (let i = 0; i < live.length; i++) {
+          budget.checkToolCall();
+          budget.countToolCall();
+        }
+        await runAtOnce(ordinal, live);
+      } else {
+        for (const [i, call] of live.entries()) {
+          budget.checkToolCall();
+          budget.countToolCall();
+          await runOne(ordinal + i, call);
+        }
       }
 
       const toolMessage: Message = { role: "user", content: results };
@@ -307,10 +348,72 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
   };
 }
 
-interface RecordedEffect {
-  kind: "clock" | "uuid" | "random";
+type ToolUse = Extract<ContentBlock, { type: "tool_use" }>;
+type ToolResult = { content: string; isError: boolean };
+type DeterministicKind = (typeof DETERMINISTIC_KINDS)[number];
+
+/** A journal read a tool made, ready to go in the log. */
+interface RecordedRead {
+  kind: DeterministicKind;
   key: string;
-  outcome: EffectOutcome<unknown>;
+  value: unknown;
+  index: number;
+  replayed: boolean;
+  durationMs: number;
+}
+
+/** A read whose value is settled but whose slot in the log is not yet claimed. */
+interface DetachedRead {
+  kind: DeterministicKind;
+  key: string;
+  value: unknown;
+}
+
+/** How a tool context resolves one read. The two callers differ only in this. */
+type Take = <T>(kind: DeterministicKind, key: string, execute: () => T | Promise<T>) => Promise<T>;
+
+/** The reads recorded inside a tool call that was itself served from the log. */
+function replayedReads(outcome: EffectOutcome<ToolResult>): RecordedRead[] {
+  return outcome.nested.map((e) => ({
+    kind: e.kind as DeterministicKind,
+    key: e.key,
+    value: e.value,
+    index: e.index,
+    replayed: true,
+    durationMs: 0,
+  }));
+}
+
+function toolKey(step: number, ordinal: number, name: string): string {
+  return `step:${step}#${ordinal}:${name}`;
+}
+
+/**
+ * Call a tool and turn whatever happens into something the model can read. A
+ * failing or missing tool is information for the model, not a crash for the
+ * run — hand the error back and let it recover.
+ */
+async function invoke(
+  tools: ReadonlyMap<string, Tool>,
+  call: ToolUse,
+  context: ToolContext,
+): Promise<ToolResult> {
+  try {
+    const tool = tools.get(call.name);
+    if (!tool) throw new ToolNotFoundError(call.name, [...tools.keys()]);
+    return { content: String(await tool.run(call.input, context)), isError: false };
+  } catch (cause) {
+    return { content: describe(cause), isError: true };
+  }
+}
+
+function toolResult(call: ToolUse, value: ToolResult): UserBlock {
+  return {
+    type: "tool_result",
+    toolUseId: call.id,
+    content: value.content,
+    ...(value.isError ? { isError: true } : {}),
+  };
 }
 
 /**
@@ -322,29 +425,68 @@ interface RecordedEffect {
  * it — which is correct: that is a different tool, and it should get fresh
  * values rather than inherit someone else's.
  */
-function toolContext(
-  journal: Journal,
-  step: number,
-  ownerKey: string,
-  journaled: RecordedEffect[],
-): ToolContext {
+function toolContext(step: number, ownerKey: string, take: Take): ToolContext {
   const ordinals = new Map<string, number>();
 
-  const take = async <T>(kind: RecordedEffect["kind"], execute: () => T): Promise<T> => {
+  const at = <T>(kind: DeterministicKind, execute: () => T): Promise<T> => {
     const ordinal = ordinals.get(kind) ?? 0;
     ordinals.set(kind, ordinal + 1);
-    const key = nestedKey(ownerKey, kind, ordinal);
-    const outcome = await journal.deterministic<T>(kind, key, execute);
-    journaled.push({ kind, key, outcome });
-    return outcome.value;
+    return take(kind, nestedKey(ownerKey, kind, ordinal), execute);
   };
 
   return {
     step,
-    now: () => take("clock", () => Date.now()),
-    uuid: () => take("uuid", () => randomUUID()),
-    random: () => take("random", () => Math.random()),
+    now: () => at("clock", () => Date.now()),
+    uuid: () => at("uuid", () => randomUUID()),
+    random: () => at("random", () => Math.random()),
   };
+}
+
+/** Reads go through the journal as they happen, and claim their slots there. */
+function journaledContext(
+  journal: Journal,
+  step: number,
+  ownerKey: string,
+  journaled: RecordedRead[],
+): ToolContext {
+  const take = async <T>(
+    kind: DeterministicKind,
+    key: string,
+    execute: () => T | Promise<T>,
+  ): Promise<T> => {
+    const read = await journal.deterministic<T>(kind, key, execute);
+    journaled.push({ kind, key, ...read });
+    return read.value;
+  };
+  return toolContext(step, ownerKey, take);
+}
+
+/**
+ * Reads resolve now; their slots are claimed later, when the batch that
+ * produced them is committed in order.
+ *
+ * The value has to settle here — the tool is about to use it — but it can,
+ * because a deterministic read resolves by key. `recall` gives the same answer
+ * whenever it is asked, so two tools running at once cannot change what the
+ * other one reads.
+ */
+function detachedContext(
+  journal: Journal,
+  step: number,
+  ownerKey: string,
+  reads: DetachedRead[],
+): ToolContext {
+  const take = async <T>(
+    kind: DeterministicKind,
+    key: string,
+    execute: () => T | Promise<T>,
+  ): Promise<T> => {
+    const recorded = journal.recall(kind, key);
+    const value = recorded === undefined ? await execute() : (recorded as T);
+    reads.push({ kind, key, value });
+    return value;
+  };
+  return toolContext(step, ownerKey, take);
 }
 
 /** An assembled turn, cut back into the fragments a stream would have produced. */

@@ -149,6 +149,13 @@ export interface AgentSpec {
   maxTokens: number;
   effort?: Effort;
   thinking?: "adaptive" | "disabled";
+  /**
+   * Run the tool calls in a step at once instead of one after another. Off by
+   * default. The log is the same either way — results are journaled in the
+   * order the model asked for them, whatever order they finished in — but the
+   * side effects are not, so a tool that writes something wants this off.
+   */
+  parallelTools?: boolean;
 }
 
 export interface BudgetSpec {

@@ -164,6 +164,42 @@ point: a calm replayed prefix, then the step that actually types. A provider wit
 no `stream` method needs no special handling either; its turn simply arrives in
 one piece.
 
+## Tools at once
+
+A step where the model asks for four searches runs them one after another, which
+costs four round trips of latency to get one step's worth of work done. Set
+`parallelTools` and they overlap:
+
+```ts
+const agent = defineAgent({
+  name: "analyst",
+  model: "claude-opus-5",
+  parallelTools: true,
+});
+```
+
+The log does not change. Tool bodies execute concurrently, but their results are
+journaled afterwards in the order the model asked for them, so the effects land
+in the same slots with the same keys — `step:0#0:search` before `step:0#1:search`
+— whichever one finished first. A run recorded with `parallelTools` on and one
+recorded with it off produce the same event log, which is what lets a parallel
+run replay, fork, and diff like any other.
+
+Time and ids survive the same way, because a `ctx.now()` read resolves by key
+rather than by whoever reached it first: `step:0#1:search/clock:0` is the same
+slot no matter when in the batch it was read.
+
+It is off by default, and the reason is in the name of the guarantee. The *log*
+is deterministic; the *side effects* aren't. Four reads overlapping is fine; two
+tools writing to the same row is a race you have introduced, and the journal
+will faithfully record whichever result it produced.
+
+Two other things change with it on. Replayed calls are never parallelized —
+there is nothing to overlap when nothing executes — so in a fork only the live
+tail of a step runs at once. And the batch is charged against
+`budget.toolCalls` before any of it starts, so a step that cannot afford all its
+calls makes none of them, rather than leaving half a step in the log.
+
 ## Budgets
 
 Limits are enforced by the scheduler, so running out is a terminal state with a log entry — not an exception from somewhere inside a tool call.
@@ -255,7 +291,7 @@ The log holds normalized, provider-agnostic content, plus the provider's own blo
 Retrace guarantees the *agent loop* is deterministic given its journal. It does not make your tools deterministic. Specifically:
 
 - **Tool side effects are real.** A replayed tool call returns the recorded result without executing, which is the point — but a fork that goes live past a `send_email` tool will send the email again. Gate irreversible tools yourself.
-- **Tools run sequentially**, in the order the model requested them. Parallel execution would still record deterministically, but the side-effect ordering wouldn't be, so it isn't the default.
+- **Tools run sequentially by default**, in the order the model requested them. `parallelTools` overlaps them and still records deterministically — results are journaled in request order, and time and ids resolve by key — but the side-effect ordering isn't, which is why it is opt-in rather than on.
 - **Clock and randomness are journaled only if you take them from the tool context.** `ctx.now()`, `ctx.uuid()` and `ctx.random()` are recorded and stable; a tool that calls `Date.now()` directly still reads the real clock and may branch differently when it goes live.
 - **Deterministic values are matched by slot, not by meaning.** A fork that reaches `step:4#0:search` gets whatever the parent recorded at `step:4#0:search`, even if the fork's step 4 is asking a different question. For a timestamp that is the point; if your tool derives something load-bearing from `ctx.random()`, know that it is keyed by position in the run.
 - **Streaming is a view of a model call, not an effect.** Fragments never reach the log; the message they assemble into does. A replayed step reconstructs its fragments from the log, one per content block, so you get the same text back but not the same cadence.
@@ -263,7 +299,7 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 
 ## Status
 
-Early. The core — journal, agent loop, fork, replay, budgets, store, CLI, the clock/uuid/random effects, the HTML report, and streaming — is covered by 87 tests that run without network access.
+Early. The core — journal, agent loop, fork, replay, budgets, store, CLI, the clock/uuid/random effects, the HTML report, streaming, and parallel tool calls — is covered by 95 tests that run without network access.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -271,7 +307,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 87 tests, no network, no API key
+npm test           # 95 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build
