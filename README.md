@@ -147,6 +147,48 @@ const again = await replay(result.runId, { provider, tools: [search] });
 // Reaches neither the model nor the tools. Same output, $0.
 ```
 
+## Picking a run back up
+
+A run that died at step nine — the process was killed, the machine went away,
+the model call threw — left nine steps of work on disk. `resume` preloads the
+whole log and goes live at the effect it ends on:
+
+```ts
+import { resume } from "retrace";
+
+const finished = await resume(crashedRunId, { provider, tools: [search] });
+```
+
+Nothing about it is a special code path: it is a fork whose fork point is
+wherever the log happens to stop. The steps that completed replay, the tool call
+that was in flight when the process died executes, and the run carries on.
+
+```bash
+retrace resume run_20260813T0904_5f21ad --module ./agent-module.ts
+# picked up at step 9: 21 effects replayed, 4 ran live · saved $1.87
+```
+
+Because the log is appended synchronously one event at a time, the crash can
+land in the middle of a write. A final half-written line is dropped on read —
+every line before it was complete before it was started — so the prefix is still
+a truthful record of what happened. A broken line anywhere *but* the end is real
+corruption and still an error.
+
+Two things worth knowing before you run it. A tool that executed but whose
+result never reached the log will execute again, because from the log's point of
+view it never ran; the [determinism caveats](#determinism-honestly) about
+irreversible tools apply with full force here. And a run that stopped because it
+hit a limit will stop there again — the replayed steps spend the budget exactly
+as the original did — so raise `maxSteps` or the budget in the same call:
+
+```ts
+await resume(runId, { provider, tools: [search], budget: { usd: 20 } });
+```
+
+A run that ended with an answer is refused rather than re-run: the prefix would
+replay to the same answer, and the new log would look like progress that never
+happened. `replay` is the command for that.
+
 ## What if it had said something else
 
 A fork changes the agent. `overrides` changes the world it ran in: hand any
@@ -321,6 +363,7 @@ retrace diff <run-a> <run-b>  # where two runs stopped agreeing
 retrace replay <run-id>       # re-run it from the log and check it reproduces
 retrace fork <run-id> --at N  # replay the steps below N, then run live
 retrace fork … --set k=v      # …serving v in place of the effect recorded at k
+retrace resume <run-id>       # carry on a run that stopped early, from its log
 retrace report <run-id>       # write the run as one self-contained HTML page
 ```
 
@@ -360,7 +403,24 @@ retrace fork demo-original --at 3 --module ./agent-module.ts
 
 Named exports and a `default` object both work. The file is imported for its exports, so it must not run anything at import time — see `examples/research.ts`, which guards its runner behind an entry-point check for exactly that reason. `--module` is optional for `replay`, and only matters there if the log stops short of the run it recorded.
 
-Add `--on-divergence live` to either command to treat a log that disagrees with the loop as the fork point rather than an error.
+`resume` takes the same module and needs it for the same reason: it is going to
+execute. Everything else — where to pick up, what the agent is, what it was
+asked — comes out of the log.
+
+```
+$ retrace resume killed_20260813T0904 --module ./agent-module.ts
+killed_20260813T0904 → resume after 21 recorded effects
+analyst · claude-opus-5 · stopped running; the log replays, then it runs live
+...
+picked up at step 9: 21 effects replayed, 4 ran live · saved $1.87
+```
+
+If the log turns out to hold the entire run — the process died after the final
+answer but before recording that it had — it says so and spends nothing. If the
+run stopped at a limit and nothing was raised, it says that too rather than
+writing a duplicate log that looks like progress.
+
+Add `--on-divergence live` to any of these commands to treat a log that disagrees with the loop as the fork point rather than an error.
 
 `--set <effect-key>=<value>` is the counterfactual, and takes both commands. It
 is repeatable, and the value is read as JSON where it parses as JSON and as
@@ -390,7 +450,7 @@ gives you the same bytes.
 
 ## Storage
 
-Runs are JSONL under `.retrace/runs/<run-id>.jsonl`, one event per line, appended synchronously. If the process dies mid-run the log is still a truthful prefix, and a truthful prefix is enough to fork from. `MemoryStore` is the same interface with nothing on disk.
+Runs are JSONL under `.retrace/runs/<run-id>.jsonl`, one event per line, appended synchronously. If the process dies mid-run the log is still a truthful prefix — a torn final line is dropped on read, and everything before it stands — and a truthful prefix is enough to [pick the run back up](#picking-a-run-back-up). `MemoryStore` is the same interface with nothing on disk.
 
 The log holds normalized, provider-agnostic content, plus the provider's own blocks verbatim (thinking blocks are signed and have to be echoed back byte-for-byte). A run recorded today still replays after the SDK's types change underneath it.
 
@@ -399,6 +459,7 @@ The log holds normalized, provider-agnostic content, plus the provider's own blo
 Retrace guarantees the *agent loop* is deterministic given its journal. It does not make your tools deterministic. Specifically:
 
 - **Tool side effects are real.** A replayed tool call returns the recorded result without executing, which is the point — but a fork that goes live past a `send_email` tool will send the email again. Gate irreversible tools yourself.
+- **A resume re-runs the tool call that was in flight when the run died.** Its result never reached the log, so as far as the log is concerned it never ran — and the log is all `resume` has. A tool that had already done its work and was killed before returning does that work twice. This is the same hazard as the bullet above, arriving at the one moment you are least likely to be thinking about it.
 - **Tools run sequentially by default**, in the order the model requested them. `parallelTools` overlaps them and still records deterministically — results are journaled in request order, and time and ids resolve by key — but the side-effect ordering isn't, which is why it is opt-in rather than on.
 - **Clock and randomness are journaled only if you take them from the tool context.** `ctx.now()`, `ctx.uuid()` and `ctx.random()` are recorded and stable; a tool that calls `Date.now()` directly still reads the real clock and may branch differently when it goes live.
 - **Deterministic values are matched by slot, not by meaning.** A fork that reaches `step:4#0:search` gets whatever the parent recorded at `step:4#0:search`, even if the fork's step 4 is asking a different question. For a timestamp that is the point; if your tool derives something load-bearing from `ctx.random()`, know that it is keyed by position in the run.
@@ -409,7 +470,7 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 
 ## Status
 
-Early, and not yet on npm. The core — journal, agent loop, fork, replay, budgets, store, CLI, the clock/uuid/random effects, request digests and the `stale` marking built on them, value overrides, the HTML report, streaming, and parallel tool calls — is covered by 132 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+Early, and not yet on npm. The core — journal, agent loop, fork, replay, resume, budgets, store, CLI, the clock/uuid/random effects, request digests and the `stale` marking built on them, value overrides, the HTML report, streaming, and parallel tool calls — is covered by 146 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -417,7 +478,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 132 tests, no network, no API key
+npm test           # 146 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

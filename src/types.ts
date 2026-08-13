@@ -203,6 +203,15 @@ export interface ForkOrigin {
    * events themselves, marked `overridden`.
    */
   overrides?: string[];
+  /**
+   * Present when this run is carrying on from a parent that stopped early
+   * rather than re-running one that finished: everything the parent logged is
+   * replayed and execution goes live where the log ends. `after` is how many
+   * effects that was, and `parentStatus` is the state the parent stopped in —
+   * the first question anyone asks of a resumed run, and nowhere else on record
+   * once the parent's log is gone.
+   */
+  resumed?: { after: number; parentStatus: RunStatus };
 }
 
 /**

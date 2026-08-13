@@ -41,16 +41,24 @@ export class RunStore {
     if (!existsSync(file)) {
       throw new Error(`no run "${runId}" in ${this.dir}`);
     }
-    return readFileSync(file, "utf8")
-      .split("\n")
-      .filter((line) => line.trim() !== "")
-      .map((line, i) => {
-        try {
-          return JSON.parse(line) as RetraceEvent;
-        } catch {
-          throw new Error(`run "${runId}" has a corrupt event on line ${i + 1}`);
-        }
-      });
+    const text = readFileSync(file, "utf8");
+    const lines = text.split("\n").filter((line) => line.trim() !== "");
+    const events: RetraceEvent[] = [];
+
+    for (const [i, line] of lines.entries()) {
+      try {
+        events.push(JSON.parse(line) as RetraceEvent);
+      } catch {
+        // A process killed partway through an append leaves its last line
+        // half-written and no trailing newline. Every line before it was
+        // complete before that one started, so dropping it leaves a truthful
+        // prefix — which is the whole reason the log is written this way. A
+        // broken line anywhere else is real corruption and stays an error.
+        if (i === lines.length - 1 && !text.endsWith("\n")) break;
+        throw new Error(`run "${runId}" has a corrupt event on line ${i + 1}`);
+      }
+    }
+    return events;
   }
 
   list(): string[] {

@@ -10,6 +10,7 @@ import {
   inspect,
   overriddenEffects,
   replay,
+  resume,
   staleEffects,
   summarize,
 } from "./replay.ts";
@@ -25,6 +26,7 @@ const USAGE = `retrace — inspect and re-run recorded agent runs
   retrace diff <run-a> <run-b>  compare two runs step by step
   retrace replay <run-id>       re-run it from the log, and check it reproduces
   retrace fork <run-id> --at N  replay the steps below N, then run live
+  retrace resume <run-id>       carry on a run that stopped early, from its log
   retrace report <run-id>       write the run as one self-contained HTML page
 
 Options
@@ -34,7 +36,8 @@ Options
                             (default: <run-id>.html)
   --module <path>           module exporting the live half of the run — tools,
                             a provider, and agent fields to override. Required
-                            by fork; replay only needs it to go past the log.
+                            by fork and resume; replay only needs it to go past
+                            the log.
   --set <key>=<value>       serve <value> in place of the effect recorded under
                             <key>, as show prints it — "step:2#0:search=nothing
                             found". Repeatable; the key must be below --at.
@@ -98,6 +101,8 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       return cmdReplay(io, store, rest[0], modulePath, overrides, onDivergence);
     case "fork":
       return cmdFork(io, store, rest[0], atRaw, modulePath, overrides, onDivergence);
+    case "resume":
+      return cmdResume(io, store, rest[0], modulePath, overrides, onDivergence);
     case "report":
       return cmdReport(io, store, rest[0], out);
     case undefined:
@@ -126,7 +131,7 @@ function cmdLs(io: Io, store: RunStore): number {
       const saved =
         s.totals && s.totals.savedUsd > 0 ? green(`  saved ${formatUsd(s.totals.savedUsd)}`) : "";
       const from = s.forkedFrom
-        ? dim(`  ← ${s.forkedFrom.runId} @ ${s.forkedFrom.atStep}`)
+        ? dim(`  ← ${s.forkedFrom.runId} @ ${s.forkedFrom.resumed ? "resumed" : s.forkedFrom.atStep}`)
         : "";
       io.out(
         `${id.padEnd(width)}  ${padLabel(statusLabel(s.status), 16)}  ` +
@@ -147,13 +152,13 @@ function cmdShow(io: Io, store: RunStore, runId: string | undefined): number {
   io.out(`${bold(runId)}  ${statusLabel(summary.status)}\n`);
   io.out(dim(`${summary.agent.name} · ${summary.agent.model} · via ${summary.provider}\n`));
   if (summary.forkedFrom) {
-    const set = summary.forkedFrom.overrides ?? [];
-    io.out(
-      dim(
-        `forked from ${summary.forkedFrom.runId} at step ${summary.forkedFrom.atStep}` +
-          `${set.length > 0 ? `, with ${set.join(" and ")} set` : ""}\n`,
-      ),
-    );
+    const from = summary.forkedFrom;
+    const set = from.overrides ?? [];
+    const lineage = from.resumed
+      ? `resumed from ${from.runId}, which stopped ${from.resumed.parentStatus} after ` +
+        `${from.resumed.after} effect${from.resumed.after === 1 ? "" : "s"}`
+      : `forked from ${from.runId} at step ${from.atStep}`;
+    io.out(dim(`${lineage}${set.length > 0 ? `, with ${set.join(" and ")} set` : ""}\n`));
   }
   io.out(`\n${dim("input")}  ${truncate(summary.input, 200)}\n\n`);
 
@@ -395,6 +400,81 @@ async function cmdFork(
   if (result.totals.savedUsd > 0) {
     io.out(green(`the replayed prefix saved ${formatUsd(result.totals.savedUsd)}\n`));
   }
+  printOverridden(io, result.events);
+  printStale(io, result.events);
+  return result.status === "failed" ? 1 : 0;
+}
+
+/**
+ * Pick a run up where it stopped. The log replays whole and execution goes live
+ * at the effect it ends on, so a run killed at step 9 of 12 costs nine steps
+ * less to finish than starting it again.
+ */
+async function cmdResume(
+  io: Io,
+  store: RunStore,
+  runId: string | undefined,
+  modulePath: string | undefined,
+  overrides: Overrides,
+  onDivergence: "strict" | "live" | undefined,
+): Promise<number> {
+  if (!runId) return fail(io, "resume needs a run id");
+  if (modulePath === undefined) {
+    return fail(io, "resume needs --module <path>: carrying on needs tools and a provider");
+  }
+
+  const parent = inspect(runId, store);
+  const recorded = effectsOf(store.read(runId));
+  const mod = await loadRunModule(modulePath);
+  const agent = { ...parent.agent, ...mod.agent };
+
+  io.out(`${bold(runId)} ${dim(`→ resume after ${recorded.length} recorded effects`)}\n`);
+  io.out(
+    dim(
+      `${agent.name} · ${agent.model} · stopped ${parent.status}; the log replays, then it runs live\n\n`,
+    ),
+  );
+
+  const result = await resume(runId, {
+    provider: mod.provider ?? (await anthropic()),
+    tools: mod.tools ?? [],
+    // Left undefined, each of these falls back to what the parent recorded.
+    agent: mod.agent,
+    input: mod.input,
+    budget: mod.budget,
+    store,
+    overrides,
+    onDivergence: onDivergence ?? "strict",
+    onEvent: (event) => printEvent(io, event),
+  });
+
+  const effects = effectsOf(result.events);
+  const live = effects.filter((e) => !e.replayed);
+  io.out(`\n${dim("new run")} ${result.runId}\n`);
+
+  if (live.length > 0) {
+    io.out(
+      `${green(`picked up at step ${live[0]!.step}`)}${dim(
+        `: ${effects.length - live.length} effects replayed, ${live.length} ran live` +
+          `${result.totals.savedUsd > 0 ? ` · saved ${formatUsd(result.totals.savedUsd)}` : ""}\n`,
+      )}`,
+    );
+  } else if (result.status === "completed") {
+    // The parent finished its work and died before writing that it had.
+    io.out(
+      `${green("nothing left to run")}${dim(
+        ": the log already held the whole run, and it finished on replay\n",
+      )}`,
+    );
+  } else {
+    io.out(
+      `${yellow("nothing ran live")}${dim(
+        `: this run reached the end of the log and stopped ${result.status}, the way its ` +
+          `parent did. Raise the limit it hit — maxSteps, or a budget — in the module.\n`,
+      )}`,
+    );
+  }
+
   printOverridden(io, result.events);
   printStale(io, result.events);
   return result.status === "failed" ? 1 : 0;

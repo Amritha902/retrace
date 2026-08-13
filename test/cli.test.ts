@@ -143,6 +143,92 @@ test("replay reports a log that stops short of the run it recorded", async (t) =
   assert.match(io.text(), /--module/, "the error says how to carry on past the log");
 });
 
+/**
+ * A copy of a log that stops after `keepEffects` and never says how the run
+ * ended — what a killed process leaves on disk.
+ */
+function truncate(dir: string, from: string, to: string, keepEffects: number): void {
+  const store = new RunStore(dir);
+  for (const event of store.read(from)) {
+    if (event.type === "run.finished") return;
+    if (event.type === "effect" && event.index >= keepEffects) return;
+    store.append(to, event);
+  }
+}
+
+test("resume carries a killed run to its end, replaying what the log holds", async (t) => {
+  const dir = tempDir(t);
+  await record(dir);
+  // Step 0 whole, then step 1's model call: the tool it asked for never landed.
+  truncate(dir, "baseline", "killed", 3);
+  const before = calls.length;
+  const io = capture();
+
+  const code = await main(["resume", "killed", "--dir", dir, "--module", FIXTURE], io);
+
+  assert.equal(code, 0, io.errors());
+  assert.deepEqual(
+    calls.slice(before),
+    ["tool:beta", "model:Answer in one sentence."],
+    "execution begins at the tool call the log stops before",
+  );
+  assert.match(io.text(), /stopped running; the log replays/);
+  assert.match(io.text(), /picked up at step 1: 3 effects replayed, 2 ran live/);
+
+  const store = new RunStore(dir);
+  const resumed = store.list().find((id) => id !== "baseline" && id !== "killed") ?? "";
+  const summary = inspect(resumed, store);
+  assert.equal(summary.status, "completed");
+  assert.deepEqual(summary.forkedFrom, {
+    runId: "killed",
+    atStep: "all",
+    resumed: { after: 3, parentStatus: "running" },
+  });
+
+  const shown = capture();
+  await main(["show", resumed, "--dir", dir], shown);
+  assert.match(shown.text(), /resumed from killed, which stopped running after 3 effects/);
+  // This module rewrites the system prompt, so the prefix it replayed was
+  // recorded against a question the resumed run no longer asks.
+  assert.match(io.text(), /2 replayed model calls answer a request this run no longer builds/);
+});
+
+test("resume says so when the log already held the whole run", async (t) => {
+  const dir = tempDir(t);
+  await record(dir);
+  truncate(dir, "baseline", "died-at-the-post", 99);
+  const before = calls.length;
+  const io = capture();
+
+  const code = await main(["resume", "died-at-the-post", "--dir", dir, "--module", FIXTURE], io);
+
+  assert.equal(code, 0, io.errors());
+  assert.deepEqual(calls.slice(before), [], "there was nothing left to execute");
+  assert.match(io.text(), /nothing left to run: the log already held the whole run/);
+});
+
+test("resume refuses a run that finished, and says what to use instead", async (t) => {
+  const dir = tempDir(t);
+  await record(dir);
+  const io = capture();
+
+  const code = await main(["resume", "baseline", "--dir", dir, "--module", FIXTURE], io);
+
+  assert.equal(code, 1);
+  assert.match(io.errors(), /ended completed, so there is nothing left of it to run/);
+  assert.match(io.errors(), /"replay".*"fork"/s);
+});
+
+test("resume needs a module, because carrying on means executing", async (t) => {
+  const dir = tempDir(t);
+  await record(dir);
+  truncate(dir, "baseline", "killed", 3);
+  const io = capture();
+
+  assert.equal(await main(["resume", "killed", "--dir", dir], io), 1);
+  assert.match(io.errors(), /--module <path>/);
+});
+
 test("fork replays the prefix and executes from --at onward", async (t) => {
   const dir = tempDir(t);
   await record(dir);

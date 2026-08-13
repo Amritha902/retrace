@@ -55,10 +55,7 @@ function masthead(summary: RunSummary, effects: readonly Effect[]): string {
       `<span class="sep">·</span><span>${escape(summary.agent.model)}</span>` +
       `<span class="sep">·</span><span>via ${escape(summary.provider)}</span>` +
       `<span class="sep">·</span><span>${escape(isoTime(summary.startedAt))}</span></p>`,
-    from
-      ? `<p class="lineage">forked from <span class="mono">${escape(from.runId)}</span> at step ` +
-        `${escape(String(from.atStep))}</p>`
-      : "",
+    from ? `<p class="lineage">${lineage(from)}</p>` : "",
     `<p class="lede">${lede(replayed, effects.length, summary)}</p>`,
     set > 0
       ? `<p class="note">${set} of them did not come back as recorded: this run was asked ` +
@@ -70,6 +67,15 @@ function masthead(summary: RunSummary, effects: readonly Effect[]): string {
       : "",
     `<blockquote class="input">${escape(summary.input)}</blockquote>`,
   ]);
+}
+
+/** Where this run came from: a fork point, or a parent that stopped early. */
+function lineage(from: NonNullable<RunSummary["forkedFrom"]>): string {
+  const parent = `<span class="mono">${escape(from.runId)}</span>`;
+  return from.resumed
+    ? `resumed from ${parent}, which stopped ${escape(from.resumed.parentStatus)} after ` +
+        `${from.resumed.after} effect${from.resumed.after === 1 ? "" : "s"}`
+    : `forked from ${parent} at step ${escape(String(from.atStep))}`;
 }
 
 /** The one sentence worth reading if you read nothing else on the page. */

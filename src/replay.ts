@@ -140,6 +140,20 @@ export interface ForkOptions {
  * run costs six steps less than starting over.
  */
 export async function fork(parentRunId: string, options: ForkOptions): Promise<RunResult> {
+  return reenter(parentRunId, options, {});
+}
+
+/**
+ * The shared body of `fork`, `replay` and `resume`. They differ in how much of
+ * the parent's log they preload and in what they say about themselves in the
+ * new run's `run.started` event; the mechanism underneath is one function,
+ * which is the same reason replay is not a second code path.
+ */
+async function reenter(
+  parentRunId: string,
+  options: ForkOptions,
+  origin: Partial<ForkOrigin>,
+): Promise<RunResult> {
   const store = options.store ?? new RunStore();
   const parent = store.read(parentRunId);
   const started = parent.find((e) => e.type === "run.started");
@@ -169,6 +183,7 @@ export async function fork(parentRunId: string, options: ForkOptions): Promise<R
       runId: parentRunId,
       atStep: Number.isFinite(options.atStep) ? options.atStep : "all",
       ...(Object.keys(overrides).length > 0 ? { overrides: Object.keys(overrides).sort() } : {}),
+      ...origin,
     },
     ...(options.onEvent ? { onEvent: options.onEvent } : {}),
     ...(options.onStream ? { onStream: options.onStream } : {}),
@@ -215,4 +230,47 @@ export async function replay(parentRunId: string, options: ReplayOptions): Promi
     runId: options.runId ?? newRunId("replay"),
     onDivergence: options.onDivergence ?? "strict",
   });
+}
+
+/** Everything a fork takes except the fork point: a resume replays all of it. */
+export type ResumeOptions = Omit<ForkOptions, "atStep">;
+
+/**
+ * Carry on a run that stopped early — a crash, a kill, a limit it hit.
+ *
+ * The whole log is preloaded, so every step the parent got through comes back
+ * for free, and execution goes live at the exact effect the log ends on. A
+ * process killed between two tool calls picks up at the second one.
+ *
+ * This is a replay that is allowed to run off the end of its log, and the
+ * difference between the two is only intent: `replay` reports the divergence
+ * when a run does not reproduce, `resume` expects to reach the end and keep
+ * going. A run that ended with an answer has nothing to carry on from, so it is
+ * refused rather than quietly re-run — the recorded prefix would replay to the
+ * same answer and the new log would be a duplicate that looked like progress.
+ */
+export async function resume(parentRunId: string, options: ResumeOptions): Promise<RunResult> {
+  const store = options.store ?? new RunStore();
+  const events = store.read(parentRunId);
+  const parent = summarize(parentRunId, events);
+
+  if (parent.status === "completed" || parent.status === "refused") {
+    throw new Error(
+      `run "${parentRunId}" ended ${parent.status}, so there is nothing left of it to run. ` +
+        `Use "replay" to re-run it from its log, or "fork" with an earlier step to re-run part ` +
+        `of it live.`,
+    );
+  }
+
+  return reenter(
+    parentRunId,
+    {
+      ...options,
+      store,
+      atStep: Number.POSITIVE_INFINITY,
+      runId: options.runId ?? newRunId("resume"),
+      onDivergence: options.onDivergence ?? "strict",
+    },
+    { resumed: { after: effectsOf(events).length, parentStatus: parent.status } },
+  );
 }

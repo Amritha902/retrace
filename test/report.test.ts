@@ -10,6 +10,7 @@ import {
   MockProvider,
   objectSchema,
   renderReport,
+  resume,
   run,
   RunStore,
   summarize,
@@ -127,6 +128,30 @@ test("a fork's report tells its replayed prefix apart from its live steps", asyn
   assert.match(html, /badge live">live<\/span><span class="kind">model/);
   assert.match(html, /2 of 3 effects were served from a log/, "the lede counts the saving");
   assert.match(html, /replayed, not billed/);
+});
+
+test("a resumed run's report names the parent and the state it stopped in", async (t) => {
+  const dir = tempDir(t);
+  const store = new RunStore(dir);
+  await record(dir);
+  for (const event of store.read("baseline")) {
+    if (event.type === "run.finished") break;
+    if (event.type === "effect" && event.index >= 1) break;
+    store.append("killed", event);
+  }
+
+  const resumed = await resume("killed", {
+    provider: new MockProvider([{ content: [text("alpha, explained")] }]),
+    tools: [lookup],
+    store,
+    runId: "resumed",
+  });
+
+  const html = render(resumed.events, "resumed");
+  assert.match(
+    html,
+    /resumed from <span class="mono">killed<\/span>, which stopped running after 1 effect<\/p>/,
+  );
 });
 
 test("a report of a run with nothing replayed says so plainly", async (t) => {

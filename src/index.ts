@@ -36,10 +36,12 @@ export {
   inspect,
   overriddenEffects,
   replay,
+  resume,
   staleEffects,
   summarize,
   type ForkOptions,
   type ReplayOptions,
+  type ResumeOptions,
   type RunSummary,
 } from "./replay.ts";
 export { renderReport } from "./report.ts";

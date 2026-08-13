@@ -20,6 +20,13 @@ publish contains rather than what changed since something.
   goes live from the step that changed. A slot the log disagrees with raises a
   `DivergenceError` naming the effect, unless the caller asks for
   `onDivergence: "live"`.
+- **`resume`.** A run killed partway through is carried on from its log: the
+  whole prefix replays and execution goes live at the effect the log ends on, so
+  a process that died at step 9 of 12 finishes for the price of three steps. It
+  is a fork whose fork point is wherever the log stops. A run that ended with an
+  answer is refused rather than re-run, and one that stopped at a limit stops
+  there again unless the limit moves. The new run's log records what it resumed
+  from and the state that parent was in.
 - **Budgets** in dollars, steps, tool calls, tokens and wall clock, enforced by
   the scheduler — running out is a terminal `budget_exceeded` status with a log
   entry, not an exception thrown from inside a tool.
@@ -51,10 +58,11 @@ publish contains rather than what changed since something.
 
 ### The CLI
 
-`retrace ls`, `show`, `cost`, `diff`, `replay`, `fork` and `report`. `replay`
-needs nothing but the log and exits non-zero if the run failed to reproduce, so
-it works as a regression check on the loop. `fork --module <path>` supplies the
-half a log cannot hold — the tools, the provider, and any agent overrides.
+`retrace ls`, `show`, `cost`, `diff`, `replay`, `fork`, `resume` and `report`.
+`replay` needs nothing but the log and exits non-zero if the run failed to
+reproduce, so it works as a regression check on the loop. `fork --module <path>`
+and `resume --module <path>` supply the half a log cannot hold — the tools, the
+provider, and any agent overrides.
 `--set <effect-key>=<value>`, on `fork` and `replay`, is the counterfactual.
 `report` writes the run as one self-contained HTML page: no JavaScript, no
 network, readable in a light or a dark browser.
@@ -63,14 +71,16 @@ network, readable in a light or a dark browser.
 
 Runs are JSONL under `.retrace/runs/<run-id>.jsonl`, appended synchronously, so
 a process that dies mid-run leaves a truthful prefix — which is enough to fork
-from. `MemoryStore` is the same interface with nothing on disk. `AnthropicProvider`
+from, or to resume. A line torn in half by the kill is dropped on read; a broken
+line anywhere else is still an error. `MemoryStore` is the same interface with
+nothing on disk. `AnthropicProvider`
 adapts the Messages API, including adaptive thinking, `effort`, server-side
 fallbacks, and a byte-for-byte `raw` passthrough that signed thinking blocks
 depend on.
 
 ### Verified by
 
-132 tests that run with no network and no API key, plus two `[live]` integration
+146 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:
