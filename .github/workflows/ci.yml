@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Nothing in this workflow writes anything back to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One version failing is a fact worth having about the other.
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      # No ANTHROPIC_API_KEY is set anywhere in this workflow, on purpose. The
+      # two [live] tests skip themselves without one, so what CI proves is the
+      # claim the README makes: the suite passes with no network and no key.
+      - run: npm test
+
+      - run: npm run build
+
+      # The demo is the README's pitch, and it reaches nothing. If it stops
+      # working the README is wrong, which is a failure worth a red build.
+      - run: node examples/demo.ts

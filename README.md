@@ -299,7 +299,7 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 
 ## Status
 
-Early. The core — journal, agent loop, fork, replay, budgets, store, CLI, the clock/uuid/random effects, the HTML report, streaming, and parallel tool calls — is covered by 95 tests that run without network access.
+Early. The core — journal, agent loop, fork, replay, budgets, store, CLI, the clock/uuid/random effects, the HTML report, streaming, and parallel tool calls — is covered by 100 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build and the demo on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -307,12 +307,18 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 95 tests, no network, no API key
+npm test           # 100 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build
 node examples/demo.ts   # the whole pitch, scripted, no API key
 ```
+
+`.github/workflows/ci.yml` runs exactly those five commands on Node 22 and 24.
+Its steps are themselves under test: `test/ci.test.ts` reads the workflow and
+fails if it stops running a gate, names a script `package.json` does not define,
+tests a Node version below the `engines` floor, or starts supplying an API key —
+because a CI file that has quietly drifted still shows a green tick.
 
 ## License
 
