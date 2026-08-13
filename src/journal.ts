@@ -1,6 +1,21 @@
 import { DivergenceError } from "./errors.ts";
 
 /**
+ * A digest of whatever a caller fed an effect, recorded beside its result.
+ *
+ * The journal never interprets one — it only reports whether the stamp it has
+ * still matches the stamp being offered, so the caller can say whether a
+ * replayed value is still an answer to the question being asked. `facets` is
+ * that same digest taken one component at a time: the journal compares them as
+ * opaque strings and hands back the names of the ones that moved, leaving the
+ * caller, which knows what the names mean, to say it in words.
+ */
+export interface Stamp {
+  hash: string;
+  facets?: Readonly<Record<string, string>>;
+}
+
+/**
  * A recorded effect, exactly as it appears in the event log.
  */
 export interface JournalEntry {
@@ -8,13 +23,7 @@ export interface JournalEntry {
   kind: string;
   key: string;
   value: unknown;
-  /**
-   * A digest of whatever the caller fed this effect, recorded beside its
-   * result. The journal never looks inside it — it only hands back whether the
-   * stamp it has still matches the stamp being offered, so the caller can say
-   * whether a replayed value is still an answer to the question being asked.
-   */
-  stamp?: string;
+  stamp?: Stamp;
   /** Set when this value was substituted for the recorded one. See `applyOverrides`. */
   overridden?: true;
 }
@@ -33,6 +42,13 @@ export interface EffectOutcome<T> {
    * answers an older one.
    */
   stale: boolean;
+  /**
+   * Which components of the stamp moved, when both stamps carry them. This is
+   * the difference between "the prompt you rewrote" and "the tools you did not
+   * mean to change", and it is empty rather than wrong when the recorded stamp
+   * predates facets.
+   */
+  staleFacets: readonly string[];
   /**
    * True when this value came out of the log having been substituted for the
    * one recorded there — the caller asked "what if this had been different".
@@ -115,7 +131,7 @@ export class Journal {
     kind: string,
     key: string,
     execute: () => Promise<T> | T,
-    stamp?: string,
+    stamp?: Stamp,
   ): Promise<EffectOutcome<T>> {
     // Claimed before executing, so effects recorded *inside* this one take the
     // slots after it rather than colliding with it.
@@ -124,13 +140,16 @@ export class Journal {
 
     if (entry !== undefined) {
       if (entry.kind === kind && entry.key === key) {
+        // Only comparable when both sides carry a stamp; a log recorded before
+        // stamps existed is silent about this rather than wrong about it.
+        const stale =
+          entry.stamp !== undefined && stamp !== undefined && entry.stamp.hash !== stamp.hash;
         return {
           index,
           value: entry.value as T,
           replayed: true,
-          // Only comparable when both sides carry one; a log recorded before
-          // stamps existed is silent about this rather than wrong about it.
-          stale: entry.stamp !== undefined && stamp !== undefined && entry.stamp !== stamp,
+          stale,
+          staleFacets: stale ? movedFacets(entry.stamp, stamp) : [],
           overridden: entry.overridden === true,
           durationMs: 0,
           nested: this.takeNested(key),
@@ -152,6 +171,7 @@ export class Journal {
       value,
       replayed: false,
       stale: false,
+      staleFacets: [],
       overridden: false,
       durationMs: Date.now() - startedAt,
       nested: [],
@@ -182,6 +202,7 @@ export class Journal {
         value: recorded.value as T,
         replayed: true,
         stale: false,
+        staleFacets: [],
         overridden: recorded.overridden === true,
         durationMs: 0,
         nested: [],
@@ -195,6 +216,7 @@ export class Journal {
       value,
       replayed: false,
       stale: false,
+      staleFacets: [],
       overridden: false,
       durationMs: Date.now() - startedAt,
       nested: [],
@@ -229,6 +251,22 @@ export class Journal {
   }
 }
 
+/**
+ * The names of the facets two stamps disagree on.
+ *
+ * A facet on one side and not the other counts as moved: the component was
+ * present in one request and absent from the other, which is a change. Empty
+ * when either stamp carries no facets at all, because then nothing was compared
+ * — the caller has a stale effect it cannot explain, and saying so is the
+ * truthful answer.
+ */
+function movedFacets(recorded: Stamp | undefined, offered: Stamp | undefined): string[] {
+  const was = recorded?.facets;
+  const now = offered?.facets;
+  if (was === undefined || now === undefined) return [];
+  return [...new Set([...Object.keys(was), ...Object.keys(now)])].filter((n) => was[n] !== now[n]);
+}
+
 /** Build the key under which an effect nested inside `ownerKey` is recorded. */
 export function nestedKey(ownerKey: string, kind: string, ordinal: number): string {
   return `${ownerKey}${NESTED}${kind}:${ordinal}`;
@@ -243,6 +281,8 @@ export interface RecordedEffect {
   value: unknown;
   /** Digest of the model request this effect answered; becomes the entry's stamp. */
   requestHash?: string;
+  /** The same digest per component; becomes the stamp's facets. */
+  requestFacets?: Record<string, string>;
   /** Set by `applyOverrides`; a log read off disk never carries it. */
   overridden?: true;
 }
@@ -311,7 +351,14 @@ export function entryOf(effect: RecordedEffect, index: number): JournalEntry {
     kind: effect.kind,
     key: effect.key,
     value: effect.value,
-    ...(effect.requestHash === undefined ? {} : { stamp: effect.requestHash }),
+    ...(effect.requestHash === undefined
+      ? {}
+      : {
+          stamp: {
+            hash: effect.requestHash,
+            ...(effect.requestFacets === undefined ? {} : { facets: effect.requestFacets }),
+          },
+        }),
     ...(effect.overridden ? { overridden: true as const } : {}),
   };
 }

@@ -255,10 +255,16 @@ test("fork replays the prefix and executes from --at onward", async (t) => {
   // The module rewrote the system prompt, so the two steps that came out of the
   // log answered a different one. That is what forking below the change means,
   // and the fork says so rather than leaving it to be inferred.
-  assert.match(io.text(), /2 replayed model calls answer a request this run no longer builds/);
+  // The module rewrote the system prompt and nothing else, so `system` is the
+  // only thing named. A second name here would be the module declaring tools
+  // the run was not recorded with — the misconfiguration this line exists for.
+  assert.match(
+    io.text(),
+    /2 replayed model calls answer a request this run no longer builds — system changed/,
+  );
   const shown = capture();
   await main(["show", forked, "--dir", dir], shown);
-  assert.match(shown.text(), /replayed +model +step:0 +stale/);
+  assert.match(shown.text(), /replayed +model +step:0 +stale \(system\)/);
   assert.doesNotMatch(shown.text(), /replayed +tool.*stale/, "a tool call has nothing to drift");
 });
 

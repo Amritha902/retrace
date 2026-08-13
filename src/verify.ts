@@ -1,3 +1,4 @@
+import { orderFacets } from "./agent.ts";
 import { formatUsd } from "./pricing.ts";
 import { effectsOf } from "./replay.ts";
 import { fingerprint, RunStore } from "./store.ts";
@@ -284,6 +285,12 @@ function checkMarkings(events: readonly RetraceEvent[], origin: ForkOrigin | und
         return failed(name, `${effect.key} is marked stale but carries no request digest, so nothing could have compared`);
       }
       stale++;
+    } else if (effect.staleFacets !== undefined) {
+      return failed(
+        name,
+        `${effect.key} names ${effect.staleFacets.join(", ")} as having changed but is not marked stale — ` +
+          `a request cannot have moved and matched`,
+      );
     }
     if (effect.overridden) {
       if (!effect.replayed) {
@@ -299,11 +306,13 @@ function checkMarkings(events: readonly RetraceEvent[], origin: ForkOrigin | und
     }
   }
 
+  const moved = orderFacets(effectsOf(events).flatMap((e) => e.staleFacets ?? []));
   return ok(
     name,
     stale === 0 && overridden === 0
       ? "nothing in this log is marked stale or substituted"
-      : `${stale} stale, ${overridden} substituted, all of them served from the log`,
+      : `${stale} stale${moved.length > 0 ? ` (${moved.join(", ")})` : ""}, ` +
+        `${overridden} substituted, all of them served from the log`,
   );
 }
 

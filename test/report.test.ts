@@ -121,8 +121,8 @@ test("a fork's report tells its replayed prefix apart from its live steps", asyn
   assert.match(html, /forked from <span class="mono">baseline<\/span> at step 1/);
   assert.match(
     html,
-    /badge replayed">replayed<\/span><span class="badge stale"[^>]*>stale<\/span><span class="kind">model/,
-    "the replayed model call is stale: the fork rewrote the system prompt above it",
+    /badge replayed">replayed<\/span><span class="badge stale"[^>]*>stale system<\/span><span class="kind">model/,
+    "the replayed model call is stale, and the badge names the prompt as what moved",
   );
   assert.match(html, /badge replayed">replayed<\/span><span class="kind">tool/);
   assert.match(html, /badge live">live<\/span><span class="kind">model/);

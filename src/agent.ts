@@ -44,6 +44,15 @@ export interface RunOptions {
 }
 
 /**
+ * The components of a request, in the order a reader most wants to hear about
+ * them: the things you change on purpose first, the things you change by
+ * accident last.
+ */
+export const REQUEST_FACETS = ["model", "system", "tools", "conversation", "settings"] as const;
+
+export type RequestFacet = (typeof REQUEST_FACETS)[number];
+
+/**
  * A short digest of everything about a request that could change the answer to
  * it, recorded beside the answer in the log.
  *
@@ -68,6 +77,53 @@ export function requestFingerprint(request: ModelRequest): string {
     effort: request.effort,
     thinking: request.thinking,
   });
+}
+
+/**
+ * The same digest, taken one component at a time.
+ *
+ * `requestFingerprint` can only say that a replayed step is answering an older
+ * question. This says which part of the question changed, which is the
+ * difference between a fork doing what you asked and a fork you have
+ * misconfigured: rewriting the system prompt should move `system` and nothing
+ * else, so `tools` moving too means the module you passed does not declare the
+ * tools the run was recorded with.
+ *
+ * Every field `requestFingerprint` hashes belongs to exactly one facet here.
+ * If it did not, a change could move the hash without any facet naming it, and
+ * a stale step would have no explanation — `test/stale.test.ts` holds the two
+ * to that.
+ */
+export function requestFacets(request: ModelRequest): Record<RequestFacet, string> {
+  return {
+    model: fingerprint(request.model),
+    system: fingerprint(request.system ?? null),
+    tools: fingerprint(request.tools),
+    conversation: fingerprint(
+      request.messages.map((m) =>
+        m.role === "assistant" ? { role: m.role, content: m.content } : m,
+      ),
+    ),
+    settings: fingerprint({
+      maxTokens: request.maxTokens,
+      effort: request.effort,
+      thinking: request.thinking,
+    }),
+  };
+}
+
+/**
+ * Facet names in `REQUEST_FACETS` order, so every surface that prints them
+ * prints them the same way. A name from a log this build does not know about
+ * sorts to the end rather than being dropped — an older or newer writer's facet
+ * is still something that moved.
+ */
+export function orderFacets(names: readonly string[]): string[] {
+  const rank = (n: string): number => {
+    const i = (REQUEST_FACETS as readonly string[]).indexOf(n);
+    return i === -1 ? REQUEST_FACETS.length : i;
+  };
+  return [...new Set(names)].sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : 1));
 }
 
 export function defineAgent(spec: Partial<AgentSpec> & { name: string }): AgentSpec {
@@ -153,6 +209,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
         thinking: agent.thinking,
       };
       const requestHash = requestFingerprint(request);
+      const facets = requestFacets(request);
       const stream = onStream && provider.stream ? provider.stream.bind(provider) : undefined;
       const modelCall = await journal.effect<ModelResponse>(
         "model",
@@ -161,7 +218,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
           stream && onStream
             ? stream(request, (delta) => onStream({ step, replayed: false, delta }))
             : provider.complete(request),
-        requestHash,
+        { hash: requestHash, facets },
       );
       const response = modelCall.value;
 
@@ -186,7 +243,13 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
         replayed: modelCall.replayed,
         durationMs: modelCall.durationMs,
         requestHash,
+        requestFacets: facets,
         ...(modelCall.stale ? { stale: true } : {}),
+        // Recorded rather than derived: this log holds the request this run
+        // built, and the one it no longer matches is in the parent's.
+        ...(modelCall.staleFacets.length > 0
+          ? { staleFacets: orderFacets(modelCall.staleFacets) }
+          : {}),
         ...(modelCall.overridden ? { overridden: true } : {}),
       });
 

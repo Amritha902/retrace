@@ -48,6 +48,17 @@ publish contains rather than what changed since something.
   `stale` — expected in a fork below the step you changed, and a sign the loop is
   reading something the journal does not cover if it appears in a plain replay.
   Surfaced by `staleEffects(events)`, by `show`, and by the HTML report.
+- **…and which part of the request moved.** Alongside `requestHash`, each model
+  effect records `requestFacets`: the same digest taken one component at a time —
+  `model`, `system`, `tools`, `conversation`, `settings`. A stale step records
+  the ones that disagree, so `show` reads `stale (system)` where a rewritten
+  prompt is the cause and `stale (conversation)` where an overridden value is,
+  and a fork reporting `system, tools` is telling you the module you passed does
+  not declare the tools the run was recorded with. Surfaced by
+  `staleFacets(events)`, by `show`, `replay`, `fork`, `resume`, `verify` and the
+  HTML report. Staleness itself is still decided by the whole-request digest, so
+  a log written before this compares exactly as it did and reports `stale` with
+  nothing named rather than naming something it never checked.
 - **Value overrides.** `fork(runId, { overrides: { "step:2#0:search": "no
   results" } })` serves a value the parent never recorded, so the live steps
   answer a changed world. The substituted effect is logged `overridden`, and the
@@ -102,7 +113,7 @@ depend on.
 
 ### Verified by
 
-167 tests that run with no network and no API key, plus two `[live]` integration
+175 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:

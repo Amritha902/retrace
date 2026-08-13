@@ -1,4 +1,4 @@
-import { run, type RunOptions } from "./agent.ts";
+import { orderFacets, run, type RunOptions } from "./agent.ts";
 import {
   applyOverrides,
   deterministicEntries,
@@ -86,6 +86,20 @@ export function effectsOf(events: readonly RetraceEvent[]) {
  */
 export function staleEffects(events: readonly RetraceEvent[]) {
   return effectsOf(events).filter((e) => e.stale === true);
+}
+
+/**
+ * What changed, across everything this run replayed stale — the union of the
+ * components its recorded requests and its rebuilt ones disagree on.
+ *
+ * This is the line worth reading after a fork. A rewritten prompt should come
+ * back `["system"]`; anything else in the list is a difference between this run
+ * and its parent that you did not ask for. Empty when nothing is stale, and
+ * also when the parent's log predates facets and there was nothing to compare —
+ * `staleEffects` is what says whether anything is stale at all.
+ */
+export function staleFacets(events: readonly RetraceEvent[]): string[] {
+  return orderFacets(staleEffects(events).flatMap((e) => e.staleFacets ?? []));
 }
 
 /** The effects a run served from a log after being told to change their value. */

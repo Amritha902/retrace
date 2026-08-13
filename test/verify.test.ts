@@ -164,7 +164,13 @@ test("a substituted value is counted rather than held against the parent", async
   // with its parent, so it is excluded from the comparison and said out loud.
   assert.match(checkNamed(report, "parent").detail, /3 replayed effects are baseline's/);
   assert.match(checkNamed(report, "parent").detail, /1 substituted on purpose/);
-  assert.match(checkNamed(report, "markings").detail, /1 stale, 1 substituted/);
+  // The substitution changed what step 1 was told, and nothing else about the
+  // request — so the staleness it caused names the conversation and not the
+  // prompt, which is how you tell the two apart from the log alone.
+  assert.match(
+    checkNamed(report, "markings").detail,
+    /1 stale \(conversation\), 1 substituted/,
+  );
 });
 
 test("parallel tool calls and a streamed turn leave a log that verifies like any other", async () => {
@@ -302,6 +308,37 @@ test("a value marked substituted that the run was never asked to substitute fail
   assert.match(
     checkNamed(report, "markings").detail,
     /step:1#0:lookup was substituted, but the run does not record having been asked/,
+  );
+});
+
+test("an effect naming what moved without being stale fails", async () => {
+  const store = new MemoryStore();
+  await recordBaseline(store);
+  const forked = await fork("baseline", {
+    provider: new MockProvider(answer()),
+    tools: [lookup],
+    atStep: 2,
+    store,
+    runId: "forked",
+  });
+
+  // Nothing changed on this fork, so nothing should be stale. A log that names
+  // a component as having moved while claiming the request still matches is
+  // contradicting itself, whichever half of it you believe.
+  const marked = tampered(
+    forked.events,
+    (e) => e.type === "effect" && e.key === "step:0",
+    (e) => {
+      if (e.type === "effect") e.staleFacets = ["system"];
+    },
+  );
+
+  const report = verifyEvents("forked", marked, store);
+
+  assert.equal(report.ok, false);
+  assert.match(
+    checkNamed(report, "markings").detail,
+    /step:0 names system as having changed but is not marked stale/,
   );
 });
 

@@ -254,12 +254,25 @@ export type RetraceEvent =
        */
       requestHash?: string;
       /**
+       * The same digest taken one component at a time — model, system,
+       * conversation, tools, settings. `requestHash` says a request changed;
+       * this is what lets the log say *which part of it*.
+       */
+      requestFacets?: Record<string, string>;
+      /**
        * Set when this effect was replayed but the request the loop built no
        * longer matches the one it was recorded against. Expected in a fork that
        * changed the prompt; a sign the loop is reading something the journal
        * does not cover if it shows up in a plain replay.
        */
       stale?: true;
+      /**
+       * Which components of the request moved. Present on a stale effect whose
+       * parent recorded facets; a log written before they existed is silent
+       * about this rather than wrong about it. Recorded rather than derived,
+       * because the parent's facets are not in this run's log to compare with.
+       */
+      staleFacets?: string[];
       /**
        * Set when this value was served from the log having been substituted for
        * the one recorded there. The log then holds what the run actually saw,

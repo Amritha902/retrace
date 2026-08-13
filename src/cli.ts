@@ -12,6 +12,7 @@ import {
   replay,
   resume,
   staleEffects,
+  staleFacets,
   summarize,
 } from "./replay.ts";
 import { renderReport } from "./report.ts";
@@ -180,7 +181,10 @@ function printEvent(io: Io, event: RetraceEvent): void {
     case "effect": {
       const tag = padLabel(event.replayed ? green("replayed") : yellow("live"), 9);
       const timing = event.replayed ? "" : dim(` ${event.durationMs}ms`);
-      const stale = event.stale ? yellow("  stale") : "";
+      const moved = event.staleFacets ?? [];
+      const stale = event.stale
+        ? yellow(`  stale${moved.length > 0 ? ` (${moved.join(", ")})` : ""}`)
+        : "";
       const set = event.overridden ? cyan("  set") : "";
       io.out(`  ${tag} ${event.kind.padEnd(6)} ${dim(event.key)}${timing}${set}${stale}\n`);
       if (event.kind === "tool") {
@@ -339,9 +343,13 @@ async function cmdReplay(
 function printStale(io: Io, events: readonly RetraceEvent[]): void {
   const stale = staleEffects(events).length;
   if (stale === 0) return;
+  const moved = staleFacets(events);
   io.out(
     yellow(`${stale} replayed model call${stale === 1 ? "" : "s"}`) +
-      dim(" answer a request this run no longer builds\n"),
+      dim(" answer a request this run no longer builds") +
+      // Which components moved is the actionable half: one you meant to change
+      // is the fork working, and a second one beside it is a misconfiguration.
+      dim(moved.length > 0 ? ` — ${moved.join(", ")} changed\n` : "\n"),
   );
 }
 

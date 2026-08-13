@@ -7,6 +7,7 @@
  * same log renders byte-for-byte the same page, which matters for a project
  * whose whole claim is that a recorded run reproduces.
  */
+import { orderFacets } from "./agent.ts";
 import { formatUsd } from "./pricing.ts";
 import { effectsOf, type RunSummary } from "./replay.ts";
 import type { ContentBlock, ModelResponse, RetraceEvent, Usage } from "./types.ts";
@@ -45,6 +46,7 @@ export function renderReport(summary: RunSummary, events: readonly RetraceEvent[
 function masthead(summary: RunSummary, effects: readonly Effect[]): string {
   const replayed = effects.filter((e) => e.replayed).length;
   const stale = effects.filter((e) => e.stale).length;
+  const moved = orderFacets(effects.filter((e) => e.stale).flatMap((e) => e.staleFacets ?? []));
   const set = effects.filter((e) => e.overridden).length;
   const from = summary.forkedFrom;
 
@@ -62,8 +64,9 @@ function masthead(summary: RunSummary, effects: readonly Effect[]): string {
         `what would happen if they were different. They are marked <em>set</em> below.</p>`
       : "",
     stale > 0
-      ? `<p class="note">${stale} of them answer a request this run no longer builds — a prompt ` +
-        `or a tool changed above them. They are marked <em>stale</em> below.</p>`
+      ? `<p class="note">${stale} of them answer a request this run no longer builds` +
+        (moved.length > 0 ? `: ${escape(moved.join(", "))} changed above them` : "") +
+        `. They are marked <em>stale</em> below.</p>`
       : "",
     `<blockquote class="input">${escape(summary.input)}</blockquote>`,
   ]);
@@ -343,7 +346,11 @@ function rowHead(marker: string, kind: string, key: string, durationMs: number |
 
 function mark(effect: Effect): string {
   const state = effect.replayed ? badge("replayed", "replayed") : badge("live", "live");
-  return state + (effect.overridden ? setBadge() : "") + (effect.stale ? staleBadge() : "");
+  return (
+    state +
+    (effect.overridden ? setBadge() : "") +
+    (effect.stale ? staleBadge(effect.staleFacets ?? []) : "")
+  );
 }
 
 /** Served from the log, but not the value the log recorded. */
@@ -356,13 +363,15 @@ function setBadge(): string {
 
 /**
  * Served from the log, but recorded against a different request than the one
- * this run built. The title carries the explanation so the badge doesn't have
- * to be long enough to be one.
+ * this run built. The badge names the components that moved where the log knows
+ * them; the title carries the explanation so the badge doesn't have to be long
+ * enough to be one.
  */
-function staleBadge(): string {
+function staleBadge(moved: readonly string[]): string {
+  const named = moved.length > 0 ? ` ${escape(moved.join(", "))}` : "";
   return (
     `<span class="badge stale" title="replayed from a log that recorded this answer ` +
-    `against a different request">stale</span>`
+    `against a different request">stale${named}</span>`
   );
 }
 

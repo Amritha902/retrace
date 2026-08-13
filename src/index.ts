@@ -1,4 +1,13 @@
-export { defineAgent, requestFingerprint, run, type RunOptions } from "./agent.ts";
+export {
+  defineAgent,
+  orderFacets,
+  REQUEST_FACETS,
+  requestFacets,
+  requestFingerprint,
+  run,
+  type RequestFacet,
+  type RunOptions,
+} from "./agent.ts";
 export { Budget } from "./budget.ts";
 export {
   BudgetExceededError,
@@ -19,6 +28,7 @@ export {
   type JournalEntry,
   type Overrides,
   type RecordedEffect,
+  type Stamp,
 } from "./journal.ts";
 export { loadRunModule, type RunModule } from "./module.ts";
 export { formatUsd, getRate, priceUsage, setRate, type RateCard } from "./pricing.ts";
@@ -38,6 +48,7 @@ export {
   replay,
   resume,
   staleEffects,
+  staleFacets,
   summarize,
   type ForkOptions,
   type ReplayOptions,
