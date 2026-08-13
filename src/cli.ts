@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { realpathSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { orderFacets } from "./agent.ts";
 import { loadRunModule, type RunModule } from "./module.ts";
 import { formatUsd } from "./pricing.ts";
 import type { Overrides } from "./journal.ts";
@@ -12,7 +13,6 @@ import {
   replay,
   resume,
   staleEffects,
-  staleFacets,
   summarize,
 } from "./replay.ts";
 import { renderReport } from "./report.ts";
@@ -341,16 +341,29 @@ async function cmdReplay(
  * honest description of a loop rebuilding its requests with no tools declared.
  */
 function printStale(io: Io, events: readonly RetraceEvent[]): void {
-  const stale = staleEffects(events).length;
-  if (stale === 0) return;
-  const moved = staleFacets(events);
-  io.out(
-    yellow(`${stale} replayed model call${stale === 1 ? "" : "s"}`) +
-      dim(" answer a request this run no longer builds") +
-      // Which components moved is the actionable half: one you meant to change
-      // is the fork working, and a second one beside it is a misconfiguration.
-      dim(moved.length > 0 ? ` — ${moved.join(", ")} changed\n` : "\n"),
-  );
+  const stale = staleEffects(events);
+  // A line each, because the two say different things. A stale model call is
+  // the ordinary consequence of forking; a stale tool call means the input the
+  // loop built for it moved, which only happens when something replaced the
+  // model response above it.
+  const said = {
+    model: ["answers", "answer", "a request this run no longer builds"],
+    tool: ["was", "were", "given the answer to a different call"],
+  } as const;
+
+  for (const kind of ["model", "tool"] as const) {
+    const these = stale.filter((e) => e.kind === kind);
+    if (these.length === 0) continue;
+    const [one, many, rest] = said[kind];
+    const moved = orderFacets(these.flatMap((e) => e.staleFacets ?? []));
+    io.out(
+      yellow(`${these.length} replayed ${kind} call${these.length === 1 ? "" : "s"} `) +
+        dim(`${these.length === 1 ? one : many} ${rest}`) +
+        // Which components moved is the actionable half: one you meant to change
+        // is the fork working, and a second one beside it is a misconfiguration.
+        dim(moved.length > 0 ? ` — ${moved.join(", ")} changed\n` : "\n"),
+    );
+  }
 }
 
 /** What the counterfactual actually replaced, once the run has been through it. */

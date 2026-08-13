@@ -59,6 +59,17 @@ publish contains rather than what changed since something.
   HTML report. Staleness itself is still decided by the whole-request digest, so
   a log written before this compares exactly as it did and reports `stale` with
   nothing named rather than naming something it never checked.
+- **Tool calls carry a digest too,** of the input they were called with, under
+  the facet `input`. A tool's input normally comes out of a model response that
+  itself came out of the log, so in an ordinary fork there is nothing to see —
+  which is why it was left unstamped at first, and why that was wrong. Replace a
+  model response and the tool call below it still lands in the same slot, is
+  still served from the log, and is now the parent's answer to the parent's
+  question; hand-edit or splice a log and the same thing happens. Both are now
+  marked `stale (input)` rather than passing silently. The tool's name is
+  deliberately not in the digest: a call to a different tool lands in a different
+  slot and is a `DivergenceError`. Logs whose tool calls predate this compare as
+  they always did and are reported clean rather than guessed at.
 - **Value overrides.** `fork(runId, { overrides: { "step:2#0:search": "no
   results" } })` serves a value the parent never recorded, so the live steps
   answer a changed world. The substituted effect is logged `overridden`, and the
@@ -113,7 +124,7 @@ depend on.
 
 ### Verified by
 
-175 tests that run with no network and no API key, plus two `[live]` integration
+185 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:

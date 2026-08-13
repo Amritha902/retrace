@@ -130,6 +130,39 @@ test("a fork's report tells its replayed prefix apart from its live steps", asyn
   assert.match(html, /replayed, not billed/);
 });
 
+test("a tool answered a different call gets its own badge and its own explanation", async (t) => {
+  const dir = tempDir(t);
+  await record(dir);
+  const forked = await fork("baseline", {
+    provider: new MockProvider([{ content: [text("shorter")] }]),
+    atStep: 1,
+    tools: [lookup],
+    overrides: {
+      "step:0": {
+        model: "claude-opus-5",
+        content: [{ type: "tool_use", id: "t1", name: "lookup", input: { term: "omega" } }],
+        stopReason: "tool_use",
+        usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      },
+    },
+    store: new RunStore(dir),
+    runId: "rerouted",
+  });
+
+  const html = render(forked.events, "rerouted");
+
+  assert.match(
+    html,
+    /badge stale"[^>]*>stale input<\/span><span class="kind">tool/,
+    "the tool call is stale, and the badge names its input as what moved",
+  );
+  // Its own sentence rather than being counted in with the model calls: a
+  // request the run no longer builds and a tool handed somebody else's answer
+  // are different things to have gone wrong.
+  assert.match(html, /1 of them was given the answer to a different call/);
+  assert.doesNotMatch(html, /of them answer a request this run no longer builds/);
+});
+
 test("a resumed run's report names the parent and the state it stopped in", async (t) => {
   const dir = tempDir(t);
   const store = new RunStore(dir);

@@ -95,8 +95,27 @@ With no tools declared, the requests the loop assembles are not the ones the log
 was recorded with. It still reproduces. It just tells you what it reproduced
 from, and now which part of the question it is no longer asking.
 
-Tool calls carry no digest, because they cannot drift: a tool's input below a
-fork point comes out of the log along with everything else.
+Tool calls carry a digest too, of the input they were called with. Usually there
+is nothing in it to see: a tool's input comes out of a model response, and below
+a fork point that response comes out of the log along with everything else, so
+rewriting the prompt moves `system` on the model calls and leaves every tool
+call in the prefix answering exactly what it was asked.
+
+Where it earns its keep is the one thing that *can* move a tool's input without
+moving its slot — [replacing the model response above
+it](#what-if-it-had-said-something-else), or a log edited by hand:
+
+```bash
+retrace fork demo-original --at 3 --set 'step:0=…asking for a different query…'
+# 1 replayed tool call was given the answer to a different call — input changed
+```
+
+The key `step:0#0:search` matched, so the log answered; the query it answered
+was the parent's, not this run's. That used to be silent, and silence is the
+worst outcome for a counterfactual — you would read the result as the tool's
+answer to a question it was never put. The facet is `input`, and the tool's own
+name is deliberately not in the digest: a call to a *different* tool lands in a
+different slot, which is a `DivergenceError` rather than a staleness.
 
 ## Install
 
@@ -261,6 +280,13 @@ $ retrace fork demo-original --at 3 --set 'step:0#0:search=no results' --module 
 the one you recorded, and what moved underneath it is what it was told. That is
 the whole difference between changing the agent and changing the world, and it
 now comes out of the log rather than out of remembering which command you ran.
+
+Replacing a *model response* is the sharper version of the same move, and the
+one place a replayed tool call can stop being an answer. Hand step 0 a response
+that asks for a different query and step 0's tool call still lands in
+`step:0#0:search`, still comes out of the log, and is now the parent's answer to
+the parent's question. It is marked `stale (input)` for it — see [what a
+replayed step is still answering](#what-a-replayed-step-is-still-answering).
 
 That second line is the honest reading of the first. The counterfactual is real
 for step 3, which ran live against the new world; steps 1 and 2 are the old
@@ -559,7 +585,8 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 - **Deterministic values are matched by slot, not by meaning.** A fork that reaches `step:4#0:search` gets whatever the parent recorded at `step:4#0:search`, even if the fork's step 4 is asking a different question. For a timestamp that is the point; if your tool derives something load-bearing from `ctx.random()`, know that it is keyed by position in the run.
 - **Streaming is a view of a model call, not an effect.** Fragments never reach the log; the message they assemble into does. A replayed step reconstructs its fragments from the log, one per content block, so you get the same text back but not the same cadence.
 - **Changing `input`, the prompt or the tools on a fork with `atStep > 0` does nothing for the replayed steps** — those model calls come from the log, which was produced with the old ones. That is the point of forking, and since it is easy to forget, the log now marks each such step `stale`: replayed, and recorded against a request this run no longer builds. Fork at 0 to change what the replayed steps saw.
-- **The digest behind `stale` covers the request, not the world.** Model, system prompt, tools, conversation, token and thinking settings — all of it, and each of them separately, so the log names which one moved rather than only that one did. A tool that returns something different today because a database moved underneath it is not something a request digest can see. Nor is the list a diff: it says the system prompt changed, not what it changed to, because a digest is all the log keeps.
+- **The digest behind `stale` covers what was asked, not the world.** For a model call that is the request: model, system prompt, tools, conversation, token and thinking settings — all of it, and each of them separately, so the log names which one moved rather than only that one did. For a tool call it is the input the model supplied, under the facet `input`. A tool that returns something different today because a database moved underneath it is not something either digest can see. Nor is the list a diff: it says the system prompt changed, not what it changed to, because a digest is all the log keeps.
+- **A tool call's digest is a check on the question, not on the tool.** It catches the case where a replayed tool call is handed the parent's answer to a call this run does not make — which happens when a model response above it was [replaced](#what-if-it-had-said-something-else), and essentially never otherwise. It says nothing about whether the recorded result is still what the tool would return. Tool calls recorded before this existed carry no digest and are reported clean rather than guessed at, exactly as older model calls are.
 - **A log recorded before the per-component digests still compares, and still won't guess.** Staleness is decided by the whole-request digest, which has not changed, so an older log detects it exactly as before; it simply has no components to compare, and reports `stale` with nothing named rather than naming something it did not check.
 - **`verify` checks the log against the log.** It proves that a fork's free
   prefix is the prefix its parent recorded, that following the chain up leads to
@@ -569,11 +596,11 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   thing — nothing that reads only a log can. And it can only follow a lineage as
   far as the logs it has: a chain that leaves the store is traced to that point
   and reported skipped, not passed.
-- **An override is a counterfactual for the steps above it and nothing else.** Replacing a value changes what the live steps see; the replayed steps between it and the fork point still come out of the log as recorded, and are marked `stale` for it. The fork's log is a truthful record of a run that answered a question its parent never asked — it is not a record of what the parent would have done, because nothing re-ran to find out.
+- **An override is a counterfactual for the steps above it and nothing else.** Replacing a value changes what the live steps see; the replayed steps between it and the fork point still come out of the log as recorded, and are marked `stale` for it — the model calls on `conversation`, and any tool call whose input the substitution moved on `input`. The fork's log is a truthful record of a run that answered a question its parent never asked — it is not a record of what the parent would have done, because nothing re-ran to find out.
 
 ## Status
 
-Early, and not yet on npm. The core — journal, agent loop, fork, replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request digests and the `stale` marking built on them, value overrides, the HTML report, streaming, parallel tool calls, and the `verify` audit — is covered by 175 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+Early, and not yet on npm. The core — journal, agent loop, fork, replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests and the `stale` marking built on them, value overrides, the HTML report, streaming, parallel tool calls, and the `verify` audit — is covered by 185 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -581,7 +608,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 175 tests, no network, no API key
+npm test           # 185 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

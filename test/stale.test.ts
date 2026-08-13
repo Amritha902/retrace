@@ -17,11 +17,15 @@ import {
   staleFacets,
   text,
   tool,
+  TOOL_FACETS,
+  toolFacets,
+  toolFingerprint,
   toolUse,
   type Message,
   type ModelRequest,
   type RequestFacet,
   type RetraceEvent,
+  type ToolUse,
 } from "../src/index.ts";
 
 const agent = defineAgent({
@@ -78,15 +82,15 @@ test("a recorded model call carries the digest of the request it answered", asyn
   );
 });
 
-test("a tool call carries no request digest", async () => {
+test("a tool call carries the digest of the input it was made with", async () => {
   const store = new MemoryStore();
   const baseline = await recordBaseline(store);
 
   const tools = effectsOf(baseline.events).filter((e) => e.kind === "tool");
   assert.equal(tools.length, 1);
-  // A tool's input below a fork point comes out of the log with everything
-  // else, so there is nothing it could drift against.
-  assert.equal(tools[0]?.requestHash, undefined);
+  assert.match(tools[0]?.requestHash ?? "", /^[0-9a-f]{12}$/);
+  assert.deepEqual(Object.keys(tools[0]?.requestFacets ?? {}), ["input"]);
+  assert.equal(tools[0]?.stale, undefined, "nothing was replayed, so nothing can be stale");
 });
 
 test("a faithful replay marks nothing stale", async () => {
@@ -282,8 +286,48 @@ test("every field that changes the digest is named by exactly one facet", () => 
 test("facets are named in a fixed order, whatever order they are found in", () => {
   assert.deepEqual(orderFacets(["settings", "system", "model"]), ["model", "system", "settings"]);
   assert.deepEqual(orderFacets(["tools", "tools"]), ["tools"], "a name is reported once");
-  // A facet from a log some other build wrote is still something that moved.
-  assert.deepEqual(orderFacets(["temperature", "system"]), ["system", "temperature"]);
+  // A tool's facet is known, and sorts after the request's rather than with
+  // whatever the build has never heard of.
+  assert.deepEqual(orderFacets(["input", "temperature", "system"]), [
+    "system",
+    "input",
+    "temperature",
+  ]);
+});
+
+// ------------------------------------------------- what a tool was asked
+
+const call: ToolUse = { type: "tool_use", id: "t1", name: "lookup", input: { term: "alpha" } };
+
+test("the tool digest covers the input and not the order it was written in", () => {
+  const reordered: ToolUse = {
+    type: "tool_use",
+    id: "t1",
+    name: "lookup",
+    input: { depth: 2, term: "alpha" },
+  };
+  assert.equal(
+    toolFingerprint({ ...call, input: { term: "alpha", depth: 2 } }),
+    toolFingerprint(reordered),
+  );
+  assert.notEqual(toolFingerprint({ ...call, input: { term: "beta" } }), toolFingerprint(call));
+  assert.deepEqual(toolFacets(call), { input: toolFingerprint(call) });
+  assert.deepEqual([...TOOL_FACETS], ["input"]);
+});
+
+test("the tool digest ignores the id the model gave the call", () => {
+  // The id correlates a call with its result inside one turn. It is generated
+  // fresh by the model and carries nothing about what the tool was asked, so
+  // hashing it would make every call look changed.
+  assert.equal(toolFingerprint({ ...call, id: "t99" }), toolFingerprint(call));
+});
+
+test("the tool digest ignores the tool's name, which the effect's key already fixes", () => {
+  // Not an oversight: a call to a different tool lands in a different slot, so
+  // it is a divergence — a louder thing than staleness — long before a digest
+  // would be consulted. `a fork whose shape changed is a divergence` in
+  // test/fork.test.ts is where that is held.
+  assert.equal(toolFingerprint({ ...call, name: "search" }), toolFingerprint(call));
 });
 
 // ------------------------------------------------------- what went stale
@@ -358,6 +402,142 @@ test("several changes at once are all named, in a fixed order", async () => {
   });
 
   assert.deepEqual(staleFacets(forked.events), ["model", "system", "tools"]);
+});
+
+// --------------------------------- a tool handed the answer to another call
+
+/** Two lookups, then an answer: the second step's call is built from the first. */
+const twoLookups = () => [
+  { content: [toolUse("t1", "lookup", { term: "alpha" })] },
+  { content: [toolUse("t2", "lookup", { term: "beta" })] },
+  { content: [text("both, explained")] },
+];
+
+/** A model response that asks for a lookup of `term`, shaped as the log holds it. */
+function askingFor(term: string) {
+  return {
+    model: "claude-opus-5",
+    content: [{ type: "tool_use", id: "t1", name: "lookup", input: { term } }],
+    stopReason: "tool_use",
+    usage: { inputTokens: 1000, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  };
+}
+
+test("a replayed tool call given the answer to a different call comes back stale", async () => {
+  const store = new MemoryStore();
+  await run("explain alpha and beta", {
+    agent,
+    provider: new MockProvider(twoLookups()),
+    tools: [lookup],
+    store,
+    runId: "two",
+  });
+
+  // Replacing the model response at step 0 changes what step 0's tool is asked.
+  // The slot is the same, so the log answers it — with the answer to "alpha".
+  // Before the tool digest that was silent, and a counterfactual you would have
+  // read as the tool's answer to a question it was never put.
+  const forked = await fork("two", {
+    provider: new MockProvider([{ content: [text("live answer")] }]),
+    atStep: 2,
+    tools: [lookup],
+    overrides: { "step:0": askingFor("OMEGA") },
+    store,
+    runId: "rerouted",
+  });
+
+  const stale = staleEffects(forked.events);
+  assert.deepEqual(
+    stale.map((e) => ({ key: e.key, facets: e.staleFacets })),
+    [
+      // The tool was asked for OMEGA and handed the definition of alpha.
+      { key: "step:0#0:lookup", facets: ["input"] },
+      // And step 1 answered a conversation containing that wrong answer.
+      { key: "step:1", facets: ["conversation"] },
+    ],
+  );
+  assert.deepEqual(staleFacets(forked.events), ["conversation", "input"]);
+});
+
+test("a tool call whose input did not move stays clean under a changed conversation", async () => {
+  const store = new MemoryStore();
+  await run("explain alpha and beta", {
+    agent,
+    provider: new MockProvider(twoLookups()),
+    tools: [lookup],
+    store,
+    runId: "two",
+  });
+
+  // The ordinary counterfactual: a tool *result* is replaced. Every model call
+  // above it is answering a conversation that no longer exists — but the calls
+  // themselves are unchanged, because the responses they came from replayed
+  // intact. A digest that marked those stale too would be crying wolf on the
+  // one shape of fork this thing exists to make cheap.
+  const forked = await fork("two", {
+    provider: new MockProvider([{ content: [text("live answer")] }]),
+    atStep: 2,
+    tools: [lookup],
+    overrides: { "step:0#0:lookup": "no results" },
+    store,
+    runId: "counterfactual",
+  });
+
+  assert.deepEqual(
+    staleEffects(forked.events).map((e) => e.key),
+    ["step:1"],
+  );
+  assert.deepEqual(staleFacets(forked.events), ["conversation"]);
+});
+
+test("a plain replay proves the tool inputs were rebuilt, not merely the results reused", async () => {
+  const store = new MemoryStore();
+  await run("explain alpha and beta", {
+    agent,
+    provider: new MockProvider(twoLookups()),
+    tools: [lookup],
+    store,
+    runId: "two",
+  });
+
+  const replayed = await replay("two", {
+    provider: new MockProvider([]),
+    tools: [lookup],
+    store,
+    runId: "again",
+  });
+
+  const tools = effectsOf(replayed.events).filter((e) => e.kind === "tool");
+  assert.equal(tools.length, 2);
+  for (const call of tools) {
+    assert.equal(call.replayed, true);
+    assert.equal(call.stale, undefined, "the loop asked each tool exactly what it asked before");
+  }
+});
+
+test("a log whose tool calls carry no digest replays without claiming they are stale", async () => {
+  const store = new MemoryStore();
+  await recordBaseline(store);
+  // What a log written before tool calls were stamped looks like: the model
+  // calls have digests, the tool calls do not.
+  for (const event of store.read("baseline")) {
+    store.append(
+      "older",
+      event.type === "effect" && event.kind === "tool"
+        ? { ...event, requestHash: undefined, requestFacets: undefined }
+        : event,
+    );
+  }
+
+  const replayed = await replay("older", {
+    provider: new MockProvider([]),
+    tools: [lookup],
+    store,
+    runId: "from-older",
+  });
+
+  assert.equal(replayed.status, "completed");
+  assert.deepEqual(staleEffects(replayed.events), []);
 });
 
 test("a parent recorded without facets leaves a stale step unexplained rather than misexplained", async () => {

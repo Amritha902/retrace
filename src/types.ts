@@ -247,30 +247,31 @@ export type RetraceEvent =
       /** Milliseconds the effect took to execute. Zero when replayed. */
       durationMs: number;
       /**
-       * Digest of the model request this effect answered. Model calls only: a
-       * tool call's input below a fork point comes out of the log too, so it
-       * cannot drift, whereas a model request is rebuilt every step from the
-       * agent spec and the conversation so far — both of which a fork can change.
+       * Digest of what this effect was asked. For a model call that is the
+       * whole request, rebuilt every step from the agent spec and the
+       * conversation so far; for a tool call it is the input the model supplied.
+       * Absent on clock, id and random reads, which are answers to no question.
        */
       requestHash?: string;
       /**
        * The same digest taken one component at a time — model, system,
-       * conversation, tools, settings. `requestHash` says a request changed;
-       * this is what lets the log say *which part of it*.
+       * conversation, tools, settings for a request; input for a tool call.
+       * `requestHash` says what was asked changed; this is what lets the log say
+       * *which part of it*.
        */
       requestFacets?: Record<string, string>;
       /**
-       * Set when this effect was replayed but the request the loop built no
-       * longer matches the one it was recorded against. Expected in a fork that
-       * changed the prompt; a sign the loop is reading something the journal
-       * does not cover if it shows up in a plain replay.
+       * Set when this effect was replayed but what the loop is asking no longer
+       * matches what it was recorded against. Expected in a fork that changed
+       * the prompt; a sign the loop is reading something the journal does not
+       * cover if it shows up in a plain replay.
        */
       stale?: true;
       /**
-       * Which components of the request moved. Present on a stale effect whose
-       * parent recorded facets; a log written before they existed is silent
-       * about this rather than wrong about it. Recorded rather than derived,
-       * because the parent's facets are not in this run's log to compare with.
+       * Which components moved. Present on a stale effect whose parent recorded
+       * facets; a log written before they existed is silent about this rather
+       * than wrong about it. Recorded rather than derived, because the parent's
+       * facets are not in this run's log to compare with.
        */
       staleFacets?: string[];
       /**

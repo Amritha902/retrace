@@ -5,8 +5,13 @@ export {
   requestFacets,
   requestFingerprint,
   run,
+  TOOL_FACETS,
+  toolFacets,
+  toolFingerprint,
   type RequestFacet,
   type RunOptions,
+  type ToolFacet,
+  type ToolUse,
 } from "./agent.ts";
 export { Budget } from "./budget.ts";
 export {

@@ -45,8 +45,9 @@ export function renderReport(summary: RunSummary, events: readonly RetraceEvent[
 
 function masthead(summary: RunSummary, effects: readonly Effect[]): string {
   const replayed = effects.filter((e) => e.replayed).length;
-  const stale = effects.filter((e) => e.stale).length;
-  const moved = orderFacets(effects.filter((e) => e.stale).flatMap((e) => e.staleFacets ?? []));
+  const staleModels = effects.filter((e) => e.stale && e.kind === "model");
+  const staleTools = effects.filter((e) => e.stale && e.kind === "tool");
+  const moved = orderFacets(staleModels.flatMap((e) => e.staleFacets ?? []));
   const set = effects.filter((e) => e.overridden).length;
   const from = summary.forkedFrom;
 
@@ -63,10 +64,20 @@ function masthead(summary: RunSummary, effects: readonly Effect[]): string {
       ? `<p class="note">${set} of them did not come back as recorded: this run was asked ` +
         `what would happen if they were different. They are marked <em>set</em> below.</p>`
       : "",
-    stale > 0
-      ? `<p class="note">${stale} of them answer a request this run no longer builds` +
+    staleModels.length > 0
+      ? `<p class="note">${staleModels.length} of them ` +
+        `${staleModels.length === 1 ? "answers" : "answer"} a request this run no longer builds` +
         (moved.length > 0 ? `: ${escape(moved.join(", "))} changed above them` : "") +
         `. They are marked <em>stale</em> below.</p>`
+      : "",
+    // Separate, because it is a different thing to have gone wrong: a model
+    // response above these was replaced, so the tool was handed the answer to
+    // the call the parent made rather than the one this run makes.
+    staleTools.length > 0
+      ? `<p class="note">${staleTools.length} of them ` +
+        `${staleTools.length === 1 ? "was" : "were"} given the answer to a different call: ` +
+        `the input this run built for them is not the one they were recorded against. ` +
+        `They are marked <em>stale</em> below.</p>`
       : "",
     `<blockquote class="input">${escape(summary.input)}</blockquote>`,
   ]);
@@ -362,8 +373,8 @@ function setBadge(): string {
 }
 
 /**
- * Served from the log, but recorded against a different request than the one
- * this run built. The badge names the components that moved where the log knows
+ * Served from the log, but recorded against a different question than the one
+ * this run asked. The badge names the components that moved where the log knows
  * them; the title carries the explanation so the badge doesn't have to be long
  * enough to be one.
  */
@@ -371,7 +382,7 @@ function staleBadge(moved: readonly string[]): string {
   const named = moved.length > 0 ? ` ${escape(moved.join(", "))}` : "";
   return (
     `<span class="badge stale" title="replayed from a log that recorded this answer ` +
-    `against a different request">stale${named}</span>`
+    `against a different question">stale${named}</span>`
   );
 }
 

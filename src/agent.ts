@@ -2,7 +2,13 @@ import { randomUUID } from "node:crypto";
 
 import { Budget } from "./budget.ts";
 import { BudgetExceededError, ToolNotFoundError } from "./errors.ts";
-import { DETERMINISTIC_KINDS, Journal, nestedKey, type EffectOutcome } from "./journal.ts";
+import {
+  DETERMINISTIC_KINDS,
+  Journal,
+  nestedKey,
+  type EffectOutcome,
+  type Stamp,
+} from "./journal.ts";
 import { fingerprint, newRunId, RunStore } from "./store.ts";
 import type {
   AgentSpec,
@@ -51,6 +57,19 @@ export interface RunOptions {
 export const REQUEST_FACETS = ["model", "system", "tools", "conversation", "settings"] as const;
 
 export type RequestFacet = (typeof REQUEST_FACETS)[number];
+
+/**
+ * The same, for a tool call. There is only one component, because the tool's
+ * name is already in the effect's key: a call to a different tool lands in a
+ * different slot and is a divergence rather than a staleness. What it was asked
+ * is all that is left, and all that decides what it would have answered.
+ */
+export const TOOL_FACETS = ["input"] as const;
+
+export type ToolFacet = (typeof TOOL_FACETS)[number];
+
+/** Every facet name this build writes, in the order every surface prints them. */
+const FACET_ORDER: readonly string[] = [...REQUEST_FACETS, ...TOOL_FACETS];
 
 /**
  * A short digest of everything about a request that could change the answer to
@@ -113,17 +132,45 @@ export function requestFacets(request: ModelRequest): Record<RequestFacet, strin
 }
 
 /**
- * Facet names in `REQUEST_FACETS` order, so every surface that prints them
- * prints them the same way. A name from a log this build does not know about
- * sorts to the end rather than being dropped — an older or newer writer's facet
- * is still something that moved.
+ * Facet names in `FACET_ORDER`, so every surface that prints them prints them
+ * the same way. A name from a log this build does not know about sorts to the
+ * end rather than being dropped — an older or newer writer's facet is still
+ * something that moved.
  */
 export function orderFacets(names: readonly string[]): string[] {
   const rank = (n: string): number => {
-    const i = (REQUEST_FACETS as readonly string[]).indexOf(n);
-    return i === -1 ? REQUEST_FACETS.length : i;
+    const i = FACET_ORDER.indexOf(n);
+    return i === -1 ? FACET_ORDER.length : i;
   };
   return [...new Set(names)].sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : 1));
+}
+
+/**
+ * A digest of the call a tool is about to be made with, recorded beside its
+ * result — the same idea as `requestFingerprint`, for the other half of the log.
+ *
+ * A tool call was long treated as unable to drift: its input comes from a model
+ * response, and below a fork point that response comes out of the log too. That
+ * holds right up until something replaces the model response — an
+ * [override](../README.md#what-if-it-had-said-something-else), a hand-edited or
+ * spliced log — and then the loop asks `step:0#0:search` for a different query
+ * and is handed the answer to the old one, silently, because the slot matches.
+ * Stamping the call is what makes that visible instead.
+ *
+ * The tool's own name is deliberately not in here; see `TOOL_FACETS`.
+ */
+export function toolFingerprint(call: ToolUse): string {
+  return fingerprint(call.input);
+}
+
+/** The same digest per component. One component, so far. */
+export function toolFacets(call: ToolUse): Record<ToolFacet, string> {
+  return { input: fingerprint(call.input) };
+}
+
+/** What a tool call is stamped with, for the journal to compare and the log to hold. */
+function toolStamp(call: ToolUse): Stamp {
+  return { hash: toolFingerprint(call), facets: toolFacets(call) };
 }
 
 export function defineAgent(spec: Partial<AgentSpec> & { name: string }): AgentSpec {
@@ -293,6 +340,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
       /** The tool's own effect, then whatever it read while it ran. */
       const emitToolCall = (
         key: string,
+        stamp: Stamp,
         outcome: EffectOutcome<ToolResult>,
         durationMs: number,
         reads: readonly RecordedRead[],
@@ -306,6 +354,12 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
           value: outcome.value,
           replayed: outcome.replayed,
           durationMs,
+          requestHash: stamp.hash,
+          requestFacets: stamp.facets,
+          ...(outcome.stale ? { stale: true } : {}),
+          ...(outcome.staleFacets.length > 0
+            ? { staleFacets: orderFacets(outcome.staleFacets) }
+            : {}),
           ...(outcome.overridden ? { overridden: true } : {}),
         });
         // After the tool's own event, so the log shows the container before its
@@ -329,12 +383,17 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
         const key = toolKey(step, ordinal, call.name);
         const journaled: RecordedRead[] = [];
         const context = journaledContext(journal, step, key, journaled);
-        const outcome = await journal.effect<ToolResult>("tool", key, () =>
-          invoke(toolsByName, call, context),
+        const stamp = toolStamp(call);
+        const outcome = await journal.effect<ToolResult>(
+          "tool",
+          key,
+          () => invoke(toolsByName, call, context),
+          stamp,
         );
 
         emitToolCall(
           key,
+          stamp,
           outcome,
           outcome.durationMs,
           // A replayed tool never ran and so asked for nothing; its reads are
@@ -368,14 +427,21 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
         );
 
         for (const [i, done] of executed.entries()) {
-          const outcome = await journal.effect<ToolResult>("tool", done.key, () => done.value);
+          const call = calls[i]!;
+          const stamp = toolStamp(call);
+          const outcome = await journal.effect<ToolResult>(
+            "tool",
+            done.key,
+            () => done.value,
+            stamp,
+          );
           const journaled: RecordedRead[] = [];
           for (const read of done.reads) {
             const committed = await journal.deterministic(read.kind, read.key, () => read.value);
             journaled.push({ kind: read.kind, key: read.key, ...committed });
           }
-          emitToolCall(done.key, outcome, done.durationMs, journaled);
-          results.push(toolResult(calls[i]!, outcome.value));
+          emitToolCall(done.key, stamp, outcome, done.durationMs, journaled);
+          results.push(toolResult(call, outcome.value));
         }
       };
 
@@ -449,7 +515,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
   };
 }
 
-type ToolUse = Extract<ContentBlock, { type: "tool_use" }>;
+export type ToolUse = Extract<ContentBlock, { type: "tool_use" }>;
 type ToolResult = { content: string; isError: boolean };
 type DeterministicKind = (typeof DETERMINISTIC_KINDS)[number];
 

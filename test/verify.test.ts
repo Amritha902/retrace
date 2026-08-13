@@ -173,6 +173,38 @@ test("a substituted value is counted rather than held against the parent", async
   );
 });
 
+test("a tool call answered from the wrong slot is a marking the audit accepts and names", async () => {
+  const store = new MemoryStore();
+  await recordBaseline(store);
+  await fork("baseline", {
+    provider: new MockProvider(answer()),
+    tools: [lookup],
+    atStep: 2,
+    // Substituting a model response is the one thing that moves a tool's input
+    // without moving its slot. The resulting log says so about itself, and the
+    // audit's job here is to accept that as a legitimate marking rather than
+    // treat a stale tool call as a shape it has never seen.
+    overrides: {
+      "step:0": {
+        model: "claude-opus-5",
+        content: [{ type: "tool_use", id: "t1", name: "lookup", input: { term: "omega" } }],
+        stopReason: "tool_use",
+        usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      },
+    },
+    store,
+    runId: "rerouted",
+  });
+
+  const report = verifyRun("rerouted", store);
+
+  assertPasses(report);
+  assert.match(
+    checkNamed(report, "markings").detail,
+    /2 stale \(conversation, input\), 1 substituted/,
+  );
+});
+
 test("parallel tool calls and a streamed turn leave a log that verifies like any other", async () => {
   const store = new MemoryStore();
   const parallel = defineAgent({ ...agent, parallelTools: true });

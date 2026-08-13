@@ -265,7 +265,38 @@ test("fork replays the prefix and executes from --at onward", async (t) => {
   const shown = capture();
   await main(["show", forked, "--dir", dir], shown);
   assert.match(shown.text(), /replayed +model +step:0 +stale \(system\)/);
-  assert.doesNotMatch(shown.text(), /replayed +tool.*stale/, "a tool call has nothing to drift");
+  // The tool calls came out of model responses that replayed intact, so each
+  // was asked exactly what it was recorded against. Rewriting the prompt does
+  // not move a tool's input, and the log should not pretend it did.
+  assert.doesNotMatch(shown.text(), /replayed +tool.*stale/);
+});
+
+test("a fork that reroutes a tool call says the tool was answered a different one", async (t) => {
+  const dir = tempDir(t);
+  await record(dir);
+  const io = capture();
+
+  // Replace step 0's model response, so step 0's tool is asked for "omega" and
+  // handed the log's answer for "alpha". Same slot, different question — the
+  // one way a replayed tool call can quietly stop being an answer.
+  const rerouted = JSON.stringify({
+    model: "claude-opus-5",
+    content: [{ type: "tool_use", id: "t1", name: "lookup", input: { term: "omega" } }],
+    stopReason: "tool_use",
+    usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  });
+
+  const code = await main(
+    ["fork", "baseline", "--at", "2", "--set", `step:0=${rerouted}`, "--dir", dir, "--module", FIXTURE],
+    io,
+  );
+
+  assert.equal(code, 0, io.errors());
+  assert.match(
+    io.text(),
+    /1 replayed tool call was given the answer to a different call — input changed/,
+  );
+  assert.match(io.text(), /replayed +tool +step:0#0:lookup +stale \(input\)/);
 });
 
 test("fork at step 0 replays nothing and takes the input from the log", async (t) => {
