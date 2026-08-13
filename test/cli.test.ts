@@ -84,6 +84,10 @@ test("replay re-runs a log with no module at all, and says it reproduced", async
   assert.equal(code, 0, io.errors());
   assert.match(io.text(), /reproduced 5 effects, identical/);
   assert.doesNotMatch(io.text(), /\blive\b/, "every effect must come from the log");
+  // With no module there are no tool schemas to declare, so the requests this
+  // loop rebuilds are not the ones the log recorded. It still reproduces; it
+  // just says what it is reproducing from.
+  assert.match(io.text(), /3 replayed model calls answer a request this run no longer builds/);
 });
 
 test("replay with a module reaches neither the provider nor the tools", async (t) => {
@@ -97,6 +101,11 @@ test("replay with a module reaches neither the provider nor the tools", async (t
   assert.equal(code, 0, io.errors());
   assert.deepEqual(calls.slice(before), [], "a replay must not execute anything");
   assert.match(io.text(), /reproduced/);
+  // The module declares the tools the run was recorded with, so the loop
+  // rebuilds the same requests — which is a stronger claim than matching
+  // outputs, and the one nothing checked before.
+  assert.doesNotMatch(io.text(), /no longer builds/);
+  assert.doesNotMatch(io.text(), /stale/);
 });
 
 test("replay writes its own run, leaving the original alone", async (t) => {
@@ -156,6 +165,15 @@ test("fork replays the prefix and executes from --at onward", async (t) => {
   assert.deepEqual(summary.forkedFrom, { runId: "baseline", atStep: 2 });
   assert.equal(summary.agent.model, agent.model, "unchanged fields come from the parent");
   assert.ok((summary.totals?.savedUsd ?? 0) > 0);
+
+  // The module rewrote the system prompt, so the two steps that came out of the
+  // log answered a different one. That is what forking below the change means,
+  // and the fork says so rather than leaving it to be inferred.
+  assert.match(io.text(), /2 replayed model calls answer a request this run no longer builds/);
+  const shown = capture();
+  await main(["show", forked, "--dir", dir], shown);
+  assert.match(shown.text(), /replayed +model +step:0 +stale/);
+  assert.doesNotMatch(shown.text(), /replayed +tool.*stale/, "a tool call has nothing to drift");
 });
 
 test("fork at step 0 replays nothing and takes the input from the log", async (t) => {

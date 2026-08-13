@@ -118,7 +118,11 @@ test("a fork's report tells its replayed prefix apart from its live steps", asyn
   const html = render(forked.events, "forked");
 
   assert.match(html, /forked from <span class="mono">baseline<\/span> at step 1/);
-  assert.match(html, /badge replayed">replayed<\/span><span class="kind">model/);
+  assert.match(
+    html,
+    /badge replayed">replayed<\/span><span class="badge stale"[^>]*>stale<\/span><span class="kind">model/,
+    "the replayed model call is stale: the fork rewrote the system prompt above it",
+  );
   assert.match(html, /badge replayed">replayed<\/span><span class="kind">tool/);
   assert.match(html, /badge live">live<\/span><span class="kind">model/);
   assert.match(html, /2 of 3 effects were served from a log/, "the lede counts the saving");

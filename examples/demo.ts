@@ -17,6 +17,7 @@ import {
   replay,
   run,
   RunStore,
+  staleEffects,
   text,
   tool,
   toolUse,
@@ -96,7 +97,12 @@ console.log(`   ${forked.status}: "${forked.output}"`);
 console.log(`   ${searches} searches re-executed (the three from the prefix were free)`);
 console.log(
   `   billed ${formatUsd(forked.totals.billedUsd)} instead of ` +
-    `${formatUsd(forked.totals.costUsd)} — saved ${formatUsd(forked.totals.savedUsd)}\n`,
+    `${formatUsd(forked.totals.costUsd)} — saved ${formatUsd(forked.totals.savedUsd)}`,
+);
+// The prefix is free, and it is also three answers given to the old
+// instruction. Both are true, and the log says both.
+console.log(
+  `   ${staleEffects(forked.events).length} of those replayed steps answer the prompt you replaced\n`,
 );
 
 const saving = 1 - forked.totals.billedUsd / original.totals.billedUsd;

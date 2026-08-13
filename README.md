@@ -12,15 +12,15 @@ analyst · claude-opus-5 · via anthropic
 forked from demo-original at step 3
 
 step 0
-  replayed  model  step:0
+  replayed  model  step:0  stale
   replayed  tool   step:0#0:search
             → 3 results for "market size"
 step 1
-  replayed  model  step:1
+  replayed  model  step:1  stale
   replayed  tool   step:1#0:search
             → 3 results for "competitors"
 step 2
-  replayed  model  step:2
+  replayed  model  step:2  stale
   replayed  tool   step:2#0:search
             → 3 results for "pricing"
 step 3
@@ -42,6 +42,45 @@ const outcome = await journal.effect("model", `step:${step}`, () => provider.com
 With an empty journal, the effect executes and gets appended to the log. With a preloaded journal, it comes back out of the log without executing. **Replay is not a separate code path**; it is the same loop with a non-empty journal. That is why a replayed run can't drift from the recorded one — there is no second implementation to drift from.
 
 A fork preloads the journal with the parent's effects up to `atStep` and leaves the rest empty. Steps below the fork point replay; the moment the log runs out, execution goes live. If the fork asks for an effect the log doesn't have in that slot — a truncated log, a hand-edited result — it fails with a `DivergenceError` naming the exact effect, rather than silently serving the wrong value.
+
+## What a replayed step is still answering
+
+Notice the word `stale` in that timeline. Every model call goes into the log with
+a digest of the request that produced it — the model, the system prompt, the
+tools, the conversation so far. When a step is served from the log, the digest
+of the request the loop *just built* is compared against it.
+
+That is the one thing a log cannot otherwise tell you. The demo above forked at
+step 3 with a rewritten system prompt, so steps 0–2 came back for free and are
+still answers to the old instruction. Both facts are true, and only one of them
+used to be visible.
+
+```bash
+retrace fork demo-original --at 3 --module ./agent-module.ts
+# 3 replayed model calls answer a request this run no longer builds
+```
+
+It is a label, not an error. Replaying the steps below the one you changed is
+what forking *is*; the point is that you can now see how much of your prefix is
+answering the old question, in `show`, in the HTML report, and in the log
+itself. In code it is `staleEffects(events)`.
+
+Where it *is* a warning is a plain replay, which should reproduce a run exactly:
+
+```bash
+retrace replay demo-original --module ./agent-module.ts
+# reproduced 7 effects, identical · $0.9200 not spent
+```
+
+Nothing stale there means the loop rebuilt the same requests, not merely that
+the same values came back out — which is a stronger claim than matching outputs,
+and the one nothing checked before. Run `replay` without `--module` and every
+model call comes back stale, correctly: with no tools declared, the requests the
+loop assembles are not the ones the log was recorded with. It still reproduces.
+It just tells you what it reproduced from.
+
+Tool calls carry no digest, because they cannot drift: a tool's input below a
+fork point comes out of the log along with everything else.
 
 ## Install
 
@@ -245,9 +284,15 @@ $ retrace replay demo-original
 ...
 new run replay_20260812163416_838c0f5e
 reproduced 7 effects, identical · $0.9200 not spent
+4 replayed model calls answer a request this run no longer builds
 ```
 
-It exits non-zero if the replay diverged, ended differently, or ran past the end of the log — so it works as a regression check on the loop itself.
+It exits non-zero if the replay diverged, ended differently, or ran past the end
+of the log — so it works as a regression check on the loop itself. The last line
+is a note rather than a failure, and here it is the honest description of a
+replay given no `--module`: the loop rebuilt its requests with no tools
+declared. Pass the module and it goes away. See [what a replayed step is still
+answering](#what-a-replayed-step-is-still-answering).
 
 `fork` has to execute the steps above the fork point, and a log cannot hold a running tool. `--module` supplies that half; everything else — input, model, budget — comes from the recorded run:
 
@@ -279,7 +324,8 @@ retrace report demo-forked -o trace.html   # or -o - to pipe it somewhere
 There is no JavaScript in it, nothing is fetched from the network, and it reads
 in a light or a dark browser. Replayed effects are green and live ones are rust,
 which in a fork makes the shape of the thing obvious at a glance: a long calm
-prefix, then the step you changed. The page is built from the log and nothing
+prefix, then the step you changed. Anything in that prefix still answering the
+question you replaced carries a `stale` badge. The page is built from the log and nothing
 else, so it renders the same on any machine, and rendering the same log twice
 gives you the same bytes.
 
@@ -298,11 +344,12 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 - **Clock and randomness are journaled only if you take them from the tool context.** `ctx.now()`, `ctx.uuid()` and `ctx.random()` are recorded and stable; a tool that calls `Date.now()` directly still reads the real clock and may branch differently when it goes live.
 - **Deterministic values are matched by slot, not by meaning.** A fork that reaches `step:4#0:search` gets whatever the parent recorded at `step:4#0:search`, even if the fork's step 4 is asking a different question. For a timestamp that is the point; if your tool derives something load-bearing from `ctx.random()`, know that it is keyed by position in the run.
 - **Streaming is a view of a model call, not an effect.** Fragments never reach the log; the message they assemble into does. A replayed step reconstructs its fragments from the log, one per content block, so you get the same text back but not the same cadence.
-- **Changing `input` on a fork with `atStep > 0` does nothing for the replayed steps** — those model calls come from the log, which was produced with the old input. Fork at 0 to change the input.
+- **Changing `input`, the prompt or the tools on a fork with `atStep > 0` does nothing for the replayed steps** — those model calls come from the log, which was produced with the old ones. That is the point of forking, and since it is easy to forget, the log now marks each such step `stale`: replayed, and recorded against a request this run no longer builds. Fork at 0 to change what the replayed steps saw.
+- **The digest behind `stale` covers the request, not the world.** Model, system prompt, tools, conversation, token and thinking settings — all of it. A tool that returns something different today because a database moved underneath it is not something a request digest can see.
 
 ## Status
 
-Early, and not yet on npm. The core — journal, agent loop, fork, replay, budgets, store, CLI, the clock/uuid/random effects, the HTML report, streaming, and parallel tool calls — is covered by 110 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+Early, and not yet on npm. The core — journal, agent loop, fork, replay, budgets, store, CLI, the clock/uuid/random effects, request digests and the `stale` marking built on them, the HTML report, streaming, and parallel tool calls — is covered by 120 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -310,7 +357,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 110 tests, no network, no API key
+npm test           # 120 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

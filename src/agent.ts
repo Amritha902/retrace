@@ -3,13 +3,14 @@ import { randomUUID } from "node:crypto";
 import { Budget } from "./budget.ts";
 import { BudgetExceededError, ToolNotFoundError } from "./errors.ts";
 import { DETERMINISTIC_KINDS, Journal, nestedKey, type EffectOutcome } from "./journal.ts";
-import { newRunId, RunStore } from "./store.ts";
+import { fingerprint, newRunId, RunStore } from "./store.ts";
 import type {
   AgentSpec,
   BudgetSpec,
   ContentBlock,
   ForkOrigin,
   Message,
+  ModelRequest,
   ModelResponse,
   Provider,
   RetraceEvent,
@@ -40,6 +41,33 @@ export interface RunOptions {
    * either way, because what gets journaled is the assembled message.
    */
   onStream?: (event: StreamEvent) => void;
+}
+
+/**
+ * A short digest of everything about a request that could change the answer to
+ * it, recorded beside the answer in the log.
+ *
+ * This is what lets a replayed model call say whether it is still answering the
+ * question being asked. Fork a run at step 3 with a rewritten system prompt and
+ * steps 0–2 come back out of the log unchanged — correct, and the whole point,
+ * but they were said to a different agent. Now the log says so.
+ *
+ * `raw` is deliberately excluded. It is the provider's own rendering of content
+ * that `content` already covers, so hashing it would make a log recorded today
+ * look changed tomorrow because the SDK reshaped a field.
+ */
+export function requestFingerprint(request: ModelRequest): string {
+  return fingerprint({
+    model: request.model,
+    system: request.system,
+    messages: request.messages.map((m) =>
+      m.role === "assistant" ? { role: m.role, content: m.content } : m,
+    ),
+    tools: request.tools,
+    maxTokens: request.maxTokens,
+    effort: request.effort,
+    thinking: request.thinking,
+  });
 }
 
 export function defineAgent(spec: Partial<AgentSpec> & { name: string }): AgentSpec {
@@ -113,7 +141,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
       budget.countStep();
       emit({ type: "step.started", step });
 
-      const request = {
+      const request: ModelRequest = {
         model: agent.model,
         system: agent.system,
         // A copy: the loop keeps mutating `messages`, and a provider that
@@ -124,11 +152,16 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
         effort: agent.effort,
         thinking: agent.thinking,
       };
+      const requestHash = requestFingerprint(request);
       const stream = onStream && provider.stream ? provider.stream.bind(provider) : undefined;
-      const modelCall = await journal.effect<ModelResponse>("model", `step:${step}`, () =>
-        stream && onStream
-          ? stream(request, (delta) => onStream({ step, replayed: false, delta }))
-          : provider.complete(request),
+      const modelCall = await journal.effect<ModelResponse>(
+        "model",
+        `step:${step}`,
+        () =>
+          stream && onStream
+            ? stream(request, (delta) => onStream({ step, replayed: false, delta }))
+            : provider.complete(request),
+        requestHash,
       );
       const response = modelCall.value;
 
@@ -152,6 +185,8 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
         value: response,
         replayed: modelCall.replayed,
         durationMs: modelCall.durationMs,
+        requestHash,
+        ...(modelCall.stale ? { stale: true } : {}),
       });
 
       const charged = budget.charge(response.model, response.usage, modelCall.replayed);

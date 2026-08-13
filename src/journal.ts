@@ -8,6 +8,13 @@ export interface JournalEntry {
   kind: string;
   key: string;
   value: unknown;
+  /**
+   * A digest of whatever the caller fed this effect, recorded beside its
+   * result. The journal never looks inside it — it only hands back whether the
+   * stamp it has still matches the stamp being offered, so the caller can say
+   * whether a replayed value is still an answer to the question being asked.
+   */
+  stamp?: string;
 }
 
 export interface EffectOutcome<T> {
@@ -16,6 +23,14 @@ export interface EffectOutcome<T> {
   value: T;
   /** True when the value came out of the log instead of the world. */
   replayed: boolean;
+  /**
+   * True when this value came out of the log but was recorded against
+   * different inputs than the ones offered now. Not an error — replaying the
+   * steps below the one you changed is what forking *is* — but it is the
+   * difference between a prefix that still answers the question and one that
+   * answers an older one.
+   */
+  stale: boolean;
   durationMs: number;
   /**
    * Effects recorded inside this one. Populated when a replay serves an effect
@@ -83,7 +98,18 @@ export class Journal {
     return this.cursor;
   }
 
-  async effect<T>(kind: string, key: string, execute: () => Promise<T> | T): Promise<EffectOutcome<T>> {
+  /**
+   * `stamp` describes the inputs this effect is about to be run with. Supplying
+   * it costs nothing on a fresh run and buys the one thing a log otherwise
+   * cannot tell you on a replay: whether the recorded answer was given to the
+   * same question.
+   */
+  async effect<T>(
+    kind: string,
+    key: string,
+    execute: () => Promise<T> | T,
+    stamp?: string,
+  ): Promise<EffectOutcome<T>> {
     // Claimed before executing, so effects recorded *inside* this one take the
     // slots after it rather than colliding with it.
     const index = this.cursor++;
@@ -95,6 +121,9 @@ export class Journal {
           index,
           value: entry.value as T,
           replayed: true,
+          // Only comparable when both sides carry one; a log recorded before
+          // stamps existed is silent about this rather than wrong about it.
+          stale: entry.stamp !== undefined && stamp !== undefined && entry.stamp !== stamp,
           durationMs: 0,
           nested: this.takeNested(key),
         };
@@ -110,7 +139,14 @@ export class Journal {
 
     const startedAt = Date.now();
     const value = await execute();
-    return { index, value, replayed: false, durationMs: Date.now() - startedAt, nested: [] };
+    return {
+      index,
+      value,
+      replayed: false,
+      stale: false,
+      durationMs: Date.now() - startedAt,
+      nested: [],
+    };
   }
 
   /**
@@ -132,12 +168,19 @@ export class Journal {
     const index = this.cursor++;
     const recorded = this.recall(kind, key);
     if (recorded !== undefined) {
-      return { index, value: recorded as T, replayed: true, durationMs: 0, nested: [] };
+      return { index, value: recorded as T, replayed: true, stale: false, durationMs: 0, nested: [] };
     }
 
     const startedAt = Date.now();
     const value = await execute();
-    return { index, value, replayed: false, durationMs: Date.now() - startedAt, nested: [] };
+    return {
+      index,
+      value,
+      replayed: false,
+      stale: false,
+      durationMs: Date.now() - startedAt,
+      nested: [],
+    };
   }
 
   /**
@@ -173,15 +216,37 @@ export function nestedKey(ownerKey: string, kind: string, ordinal: number): stri
   return `${ownerKey}${NESTED}${kind}:${ordinal}`;
 }
 
+/** What these functions need from a log's `effect` events. */
+export interface RecordedEffect {
+  step: number;
+  index: number;
+  kind: string;
+  key: string;
+  value: unknown;
+  /** Digest of the model request this effect answered; becomes the entry's stamp. */
+  requestHash?: string;
+}
+
 /** Take the effects a fork should replay: everything recorded below `atStep`. */
 export function journalUpToStep(
-  effects: readonly { step: number; index: number; kind: string; key: string; value: unknown }[],
+  effects: readonly RecordedEffect[],
   atStep: number,
 ): JournalEntry[] {
   return effects
     .filter((e) => e.step < atStep)
     .sort((a, b) => a.index - b.index)
-    .map((e, i) => ({ index: i, kind: e.kind, key: e.key, value: e.value }));
+    .map((e, i) => entryOf(e, i));
+}
+
+/** One log event as a journal entry, renumbered to its position in the prefix. */
+export function entryOf(effect: RecordedEffect, index: number): JournalEntry {
+  return {
+    index,
+    kind: effect.kind,
+    key: effect.key,
+    value: effect.value,
+    ...(effect.requestHash === undefined ? {} : { stamp: effect.requestHash }),
+  };
 }
 
 /**
@@ -192,9 +257,7 @@ export function journalUpToStep(
  * respect; a tool that stamps `now()` in a step that runs live would otherwise
  * add a second difference nobody asked for.
  */
-export function deterministicEntries(
-  effects: readonly { index: number; kind: string; key: string; value: unknown }[],
-): JournalEntry[] {
+export function deterministicEntries(effects: readonly RecordedEffect[]): JournalEntry[] {
   const kinds = new Set<string>(DETERMINISTIC_KINDS);
   return effects
     .filter((e) => kinds.has(e.kind))

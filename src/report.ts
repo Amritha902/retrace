@@ -44,6 +44,7 @@ export function renderReport(summary: RunSummary, events: readonly RetraceEvent[
 
 function masthead(summary: RunSummary, effects: readonly Effect[]): string {
   const replayed = effects.filter((e) => e.replayed).length;
+  const stale = effects.filter((e) => e.stale).length;
   const from = summary.forkedFrom;
 
   return section("masthead", [
@@ -58,6 +59,10 @@ function masthead(summary: RunSummary, effects: readonly Effect[]): string {
         `${escape(String(from.atStep))}</p>`
       : "",
     `<p class="lede">${lede(replayed, effects.length, summary)}</p>`,
+    stale > 0
+      ? `<p class="note">${stale} of them answer a request this run no longer builds — a prompt ` +
+        `or a tool changed above them. They are marked <em>stale</em> below.</p>`
+      : "",
     `<blockquote class="input">${escape(summary.input)}</blockquote>`,
   ]);
 }
@@ -326,7 +331,20 @@ function rowHead(marker: string, kind: string, key: string, durationMs: number |
 }
 
 function mark(effect: Effect): string {
-  return effect.replayed ? badge("replayed", "replayed") : badge("live", "live");
+  const state = effect.replayed ? badge("replayed", "replayed") : badge("live", "live");
+  return effect.stale ? state + staleBadge() : state;
+}
+
+/**
+ * Served from the log, but recorded against a different request than the one
+ * this run built. The title carries the explanation so the badge doesn't have
+ * to be long enough to be one.
+ */
+function staleBadge(): string {
+  return (
+    `<span class="badge stale" title="replayed from a log that recorded this answer ` +
+    `against a different request">stale</span>`
+  );
 }
 
 function badge(label: string, tone: string): string {
@@ -459,6 +477,7 @@ padding:.7rem .85rem;margin-bottom:.6rem}
 .badge.live{color:var(--live);background:var(--live-bg)}
 .badge.replayed{color:var(--replayed);background:var(--replayed-bg)}
 .badge.unrun{color:var(--bad);background:var(--bad-bg)}
+.badge.stale{color:var(--soft);border:1px dashed var(--rule);padding:0 .3rem}
 .tag{font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;color:var(--soft)}
 .tag.failed{color:var(--bad)}
 .kind{font-size:.8rem;color:var(--soft)}

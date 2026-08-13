@@ -1,6 +1,7 @@
 import { run, type RunOptions } from "./agent.ts";
 import {
   deterministicEntries,
+  entryOf,
   Journal,
   journalUpToStep,
   type DivergencePolicy,
@@ -71,6 +72,19 @@ export function effectsOf(events: readonly RetraceEvent[]) {
     .sort((a, b) => a.index - b.index);
 }
 
+/**
+ * The effects a run served from a log that were recorded against a different
+ * request than the one it built.
+ *
+ * In a fork this is the measure of what the replayed prefix is no longer
+ * answering: change the system prompt and every step below the fork point shows
+ * up here. In a plain replay it should be empty, and anything in it is the loop
+ * building a request out of something the journal does not cover.
+ */
+export function staleEffects(events: readonly RetraceEvent[]) {
+  return effectsOf(events).filter((e) => e.stale === true);
+}
+
 export interface ForkOptions {
   provider: Provider;
   /**
@@ -120,7 +134,7 @@ export async function fork(parentRunId: string, options: ForkOptions): Promise<R
   const recorded = effectsOf(parent);
   const entries: JournalEntry[] = Number.isFinite(options.atStep)
     ? journalUpToStep(recorded, options.atStep)
-    : recorded.map((e, i) => ({ index: i, kind: e.kind, key: e.key, value: e.value }));
+    : recorded.map(entryOf);
 
   const agent: AgentSpec = { ...started.agent, ...options.agent };
 

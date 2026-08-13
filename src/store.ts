@@ -103,7 +103,12 @@ export function newRunId(prefix = "run"): string {
   return `${prefix}_${stamp}_${suffix}`;
 }
 
-/** Stable fingerprint of an agent spec, for spotting "same run, different config". */
+/**
+ * A short digest that depends on a value's contents and not on the order its
+ * keys were assembled in. `JSON.stringify` alone keys on insertion order, which
+ * would make the digest a fact about the code that built the value rather than
+ * about the value.
+ */
 export function fingerprint(value: unknown): string {
   return createHash("sha256").update(stableStringify(value)).digest("hex").slice(0, 12);
 }

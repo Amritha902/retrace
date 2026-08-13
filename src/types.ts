@@ -231,6 +231,20 @@ export type RetraceEvent =
       replayed: boolean;
       /** Milliseconds the effect took to execute. Zero when replayed. */
       durationMs: number;
+      /**
+       * Digest of the model request this effect answered. Model calls only: a
+       * tool call's input below a fork point comes out of the log too, so it
+       * cannot drift, whereas a model request is rebuilt every step from the
+       * agent spec and the conversation so far — both of which a fork can change.
+       */
+      requestHash?: string;
+      /**
+       * Set when this effect was replayed but the request the loop built no
+       * longer matches the one it was recorded against. Expected in a fork that
+       * changed the prompt; a sign the loop is reading something the journal
+       * does not cover if it shows up in a plain replay.
+       */
+      stale?: true;
     }
   | { seq: number; t: number; type: "charge"; step: number; usage: Usage; costUsd: number; billedUsd: number }
   | { seq: number; t: number; type: "message"; step: number; message: Message }

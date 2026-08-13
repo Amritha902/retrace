@@ -3,7 +3,7 @@ import { realpathSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { loadRunModule, type RunModule } from "./module.ts";
 import { formatUsd } from "./pricing.ts";
-import { effectsOf, fork, inspect, replay, summarize } from "./replay.ts";
+import { effectsOf, fork, inspect, replay, staleEffects, summarize } from "./replay.ts";
 import { renderReport } from "./report.ts";
 import { DEFAULT_STORE_DIR, RunStore } from "./store.ts";
 import type { ContentBlock, Provider, RetraceEvent } from "./types.ts";
@@ -150,7 +150,8 @@ function printEvent(io: Io, event: RetraceEvent): void {
     case "effect": {
       const tag = padLabel(event.replayed ? green("replayed") : yellow("live"), 9);
       const timing = event.replayed ? "" : dim(` ${event.durationMs}ms`);
-      io.out(`  ${tag} ${event.kind.padEnd(6)} ${dim(event.key)}${timing}\n`);
+      const stale = event.stale ? yellow("  stale") : "";
+      io.out(`  ${tag} ${event.kind.padEnd(6)} ${dim(event.key)}${timing}${stale}\n`);
       if (event.kind === "tool") {
         const v = event.value as { content?: string; isError?: boolean };
         io.out(`        ${v.isError ? red("error") : dim("→")} ${truncate(v.content ?? "", 120)}\n`);
@@ -284,7 +285,23 @@ async function cmdReplay(
     `${green("reproduced")} ${recorded.length} effects, identical · ` +
       `${formatUsd(result.totals.savedUsd)} not spent\n`,
   );
+  printStale(io, result.events);
   return 0;
+}
+
+/**
+ * How much of what was replayed is answering a question this run no longer
+ * asks. Worth a line rather than an exit code: in a fork it is the expected
+ * consequence of forking, and in a replay run without `--module` it is the
+ * honest description of a loop rebuilding its requests with no tools declared.
+ */
+function printStale(io: Io, events: readonly RetraceEvent[]): void {
+  const stale = staleEffects(events).length;
+  if (stale === 0) return;
+  io.out(
+    yellow(`${stale} replayed model call${stale === 1 ? "" : "s"}`) +
+      dim(" answer a request this run no longer builds\n"),
+  );
 }
 
 async function cmdFork(
@@ -335,6 +352,7 @@ async function cmdFork(
   if (result.totals.savedUsd > 0) {
     io.out(green(`the replayed prefix saved ${formatUsd(result.totals.savedUsd)}\n`));
   }
+  printStale(io, result.events);
   return result.status === "failed" ? 1 : 0;
 }
 

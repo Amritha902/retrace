@@ -35,6 +35,12 @@ publish contains rather than what changed since something.
 - **`parallelTools`,** off by default. Tool bodies overlap; their results are
   journaled in the order the model asked for them, so the log is byte-identical
   to the sequential one.
+- **Request digests.** Every model effect records `requestHash`, a digest of the
+  model, prompt, tools and conversation that produced it. A step served from the
+  log whose digest no longer matches the request the loop just built is marked
+  `stale` — expected in a fork below the step you changed, and a sign the loop is
+  reading something the journal does not cover if it appears in a plain replay.
+  Surfaced by `staleEffects(events)`, by `show`, and by the HTML report.
 
 ### The CLI
 
@@ -56,7 +62,7 @@ depend on.
 
 ### Verified by
 
-110 tests that run with no network and no API key, plus two `[live]` integration
+120 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:

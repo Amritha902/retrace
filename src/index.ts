@@ -1,4 +1,4 @@
-export { defineAgent, run, type RunOptions } from "./agent.ts";
+export { defineAgent, requestFingerprint, run, type RunOptions } from "./agent.ts";
 export { Budget } from "./budget.ts";
 export {
   BudgetExceededError,
@@ -9,12 +9,14 @@ export {
 export {
   DETERMINISTIC_KINDS,
   deterministicEntries,
+  entryOf,
   Journal,
   journalUpToStep,
   nestedKey,
   type DivergencePolicy,
   type EffectOutcome,
   type JournalEntry,
+  type RecordedEffect,
 } from "./journal.ts";
 export { loadRunModule, type RunModule } from "./module.ts";
 export { formatUsd, getRate, priceUsage, setRate, type RateCard } from "./pricing.ts";
@@ -31,6 +33,7 @@ export {
   fork,
   inspect,
   replay,
+  staleEffects,
   summarize,
   type ForkOptions,
   type ReplayOptions,
