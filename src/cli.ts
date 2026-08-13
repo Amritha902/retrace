@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { writeFileSync } from "node:fs";
+import { realpathSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { loadRunModule, type RunModule } from "./module.ts";
 import { formatUsd } from "./pricing.ts";
@@ -486,7 +486,11 @@ function fail(io: Io, message: string): number {
   return 1;
 }
 
+// npm installs the bin as a symlink in node_modules/.bin, and Node reports the
+// link in argv[1] while import.meta.url is already the file behind it. Compared
+// unresolved, the two never match and the installed command exits having done
+// nothing at all.
 const entry = process.argv[1];
-if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
+if (entry !== undefined && import.meta.url === pathToFileURL(realpathSync(entry)).href) {
   process.exitCode = await main(process.argv.slice(2));
 }

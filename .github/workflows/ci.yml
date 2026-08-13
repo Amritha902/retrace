@@ -44,3 +44,8 @@ jobs:
       # The demo is the README's pitch, and it reaches nothing. If it stops
       # working the README is wrong, which is a failure worth a red build.
       - run: node examples/demo.ts
+
+      # test/package.test.ts checks the manifest against the sources tsc will
+      # compile. This checks it against what tsc actually emitted, which is the
+      # part no test can see — the suite runs before the build, deliberately.
+      - run: npm pack --dry-run

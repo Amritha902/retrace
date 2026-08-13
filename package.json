@@ -4,6 +4,13 @@
   "description": "A deterministic agent runtime. Every run is a replayable event log — rewind it, fork it from any step, and only pay for what changed.",
   "type": "module",
   "license": "MIT",
+  "author": "Amritha S",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Amritha902/retrace.git"
+  },
+  "homepage": "https://github.com/Amritha902/retrace#readme",
+  "bugs": "https://github.com/Amritha902/retrace/issues",
   "bin": {
     "retrace": "./dist/cli.js"
   },
@@ -13,10 +20,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
-    "dist"
+    "dist",
+    "src",
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=22.6"
@@ -24,7 +35,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test test/*.test.ts"
+    "test": "node --test test/*.test.ts",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test"
   },
   "keywords": [
     "agent",
