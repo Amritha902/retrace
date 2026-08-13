@@ -15,6 +15,8 @@ export interface JournalEntry {
    * whether a replayed value is still an answer to the question being asked.
    */
   stamp?: string;
+  /** Set when this value was substituted for the recorded one. See `applyOverrides`. */
+  overridden?: true;
 }
 
 export interface EffectOutcome<T> {
@@ -31,6 +33,11 @@ export interface EffectOutcome<T> {
    * answers an older one.
    */
   stale: boolean;
+  /**
+   * True when this value came out of the log having been substituted for the
+   * one recorded there — the caller asked "what if this had been different".
+   */
+  overridden: boolean;
   durationMs: number;
   /**
    * Effects recorded inside this one. Populated when a replay serves an effect
@@ -67,7 +74,7 @@ export class Journal {
   private cursor = 0;
   private readonly recorded: readonly JournalEntry[];
   private readonly onDivergence: DivergencePolicy;
-  private readonly keyed: ReadonlyMap<string, unknown>;
+  private readonly keyed: ReadonlyMap<string, JournalEntry>;
 
   /**
    * `recorded` is the positional sequence: it fixes the shape of the run and a
@@ -81,7 +88,7 @@ export class Journal {
   ) {
     this.recorded = recorded;
     this.onDivergence = onDivergence;
-    this.keyed = new Map(keyed.map((e) => [`${e.kind}:${e.key}`, e.value]));
+    this.keyed = new Map(keyed.map((e) => [`${e.kind}:${e.key}`, e]));
   }
 
   /** Effects still available to replay before this journal goes live. */
@@ -124,6 +131,7 @@ export class Journal {
           // Only comparable when both sides carry one; a log recorded before
           // stamps existed is silent about this rather than wrong about it.
           stale: entry.stamp !== undefined && stamp !== undefined && entry.stamp !== stamp,
+          overridden: entry.overridden === true,
           durationMs: 0,
           nested: this.takeNested(key),
         };
@@ -144,6 +152,7 @@ export class Journal {
       value,
       replayed: false,
       stale: false,
+      overridden: false,
       durationMs: Date.now() - startedAt,
       nested: [],
     };
@@ -166,9 +175,17 @@ export class Journal {
     execute: () => Promise<T> | T,
   ): Promise<EffectOutcome<T>> {
     const index = this.cursor++;
-    const recorded = this.recall(kind, key);
+    const recorded = this.keyed.get(`${kind}:${key}`);
     if (recorded !== undefined) {
-      return { index, value: recorded as T, replayed: true, stale: false, durationMs: 0, nested: [] };
+      return {
+        index,
+        value: recorded.value as T,
+        replayed: true,
+        stale: false,
+        overridden: recorded.overridden === true,
+        durationMs: 0,
+        nested: [],
+      };
     }
 
     const startedAt = Date.now();
@@ -178,6 +195,7 @@ export class Journal {
       value,
       replayed: false,
       stale: false,
+      overridden: false,
       durationMs: Date.now() - startedAt,
       nested: [],
     };
@@ -190,7 +208,7 @@ export class Journal {
    * which execute in one order and are journaled in another.
    */
   recall(kind: (typeof DETERMINISTIC_KINDS)[number], key: string): unknown {
-    return this.keyed.get(`${kind}:${key}`);
+    return this.keyed.get(`${kind}:${key}`)?.value;
   }
 
   /**
@@ -225,6 +243,54 @@ export interface RecordedEffect {
   value: unknown;
   /** Digest of the model request this effect answered; becomes the entry's stamp. */
   requestHash?: string;
+  /** Set by `applyOverrides`; a log read off disk never carries it. */
+  overridden?: true;
+}
+
+/** Values to serve in place of the recorded ones, keyed by effect key. */
+export type Overrides = Readonly<Record<string, unknown>>;
+
+/**
+ * Substitute recorded values before they are replayed.
+ *
+ * This is the counterfactual: what would the agent have done if that search had
+ * come back empty? The replaced value goes into the journal like any other, so
+ * every step above it that runs live sees the new world, and every step below it
+ * that replays is left visibly answering the old one — the request digest of a
+ * replayed model call no longer matches once its conversation has changed, which
+ * is exactly the `stale` marking a fork already carries.
+ */
+export function applyOverrides(
+  effects: readonly RecordedEffect[],
+  overrides: Overrides,
+): RecordedEffect[] {
+  const wanted = Object.keys(overrides);
+  if (wanted.length === 0) return [...effects];
+
+  const known = new Set(effects.map((e) => e.key));
+  const missing = wanted.filter((key) => !known.has(key));
+  if (missing.length > 0) {
+    throw new Error(
+      `this log records no effect ${missing.map((k) => `"${k}"`).join(", ")}. ` +
+        `An override names the effect it replaces the way "retrace show" prints ` +
+        `it — for example "step:2#0:search".`,
+    );
+  }
+
+  return effects.map((e) =>
+    Object.hasOwn(overrides, e.key) ? { ...e, value: substitute(e, overrides[e.key]), overridden: true } : e,
+  );
+}
+
+/**
+ * A tool's recorded value is `{content, isError}`, but the thing worth
+ * substituting is the text the tool handed back — so a bare value means that
+ * text, and only a `content`-shaped object replaces the outcome wholesale.
+ */
+function substitute(effect: RecordedEffect, value: unknown): unknown {
+  if (effect.kind !== "tool") return value;
+  if (typeof value === "object" && value !== null && "content" in value) return value;
+  return { content: typeof value === "string" ? value : JSON.stringify(value), isError: false };
 }
 
 /** Take the effects a fork should replay: everything recorded below `atStep`. */
@@ -246,6 +312,7 @@ export function entryOf(effect: RecordedEffect, index: number): JournalEntry {
     key: effect.key,
     value: effect.value,
     ...(effect.requestHash === undefined ? {} : { stamp: effect.requestHash }),
+    ...(effect.overridden ? { overridden: true as const } : {}),
   };
 }
 
@@ -261,5 +328,11 @@ export function deterministicEntries(effects: readonly RecordedEffect[]): Journa
   const kinds = new Set<string>(DETERMINISTIC_KINDS);
   return effects
     .filter((e) => kinds.has(e.kind))
-    .map((e) => ({ index: e.index, kind: e.kind, key: e.key, value: e.value }));
+    .map((e) => ({
+      index: e.index,
+      kind: e.kind,
+      key: e.key,
+      value: e.value,
+      ...(e.overridden ? { overridden: true as const } : {}),
+    }));
 }

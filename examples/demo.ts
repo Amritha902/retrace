@@ -14,6 +14,7 @@ import {
   formatUsd,
   MockProvider,
   objectSchema,
+  overriddenEffects,
   replay,
   run,
   RunStore,
@@ -103,6 +104,28 @@ console.log(
 // instruction. Both are true, and the log says both.
 console.log(
   `   ${staleEffects(forked.events).length} of those replayed steps answer the prompt you replaced\n`,
+);
+
+console.log("4. ask what the analyst would have said if the first search came back empty\n");
+searches = 0;
+const counterfactual = await fork("demo-original", {
+  provider: new MockProvider([
+    { content: [text("Market size unknown. Crowded. Per-seat pricing.")], usage: heavyUsage },
+  ]),
+  atStep: 3,
+  tools: [search],
+  overrides: { "step:0#0:search": "no results" },
+  store,
+  runId: "demo-counterfactual",
+});
+console.log(`   ${counterfactual.status}: "${counterfactual.output}"`);
+console.log(`   ${searches} searches executed — the empty result came out of the log, replaced`);
+// Steps 1 and 2 were recorded against the search that did return something, so
+// they are still answering the world this fork just changed. Saying so is the
+// difference between a counterfactual and a plausible-looking lie.
+console.log(
+  `   ${overriddenEffects(counterfactual.events).length} effect replaced, and ` +
+    `${staleEffects(counterfactual.events).length} replayed steps now answer the old world\n`,
 );
 
 const saving = 1 - forked.totals.billedUsd / original.totals.billedUsd;

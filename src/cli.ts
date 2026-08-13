@@ -3,7 +3,16 @@ import { realpathSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { loadRunModule, type RunModule } from "./module.ts";
 import { formatUsd } from "./pricing.ts";
-import { effectsOf, fork, inspect, replay, staleEffects, summarize } from "./replay.ts";
+import type { Overrides } from "./journal.ts";
+import {
+  effectsOf,
+  fork,
+  inspect,
+  overriddenEffects,
+  replay,
+  staleEffects,
+  summarize,
+} from "./replay.ts";
 import { renderReport } from "./report.ts";
 import { DEFAULT_STORE_DIR, RunStore } from "./store.ts";
 import type { ContentBlock, Provider, RetraceEvent } from "./types.ts";
@@ -26,6 +35,9 @@ Options
   --module <path>           module exporting the live half of the run — tools,
                             a provider, and agent fields to override. Required
                             by fork; replay only needs it to go past the log.
+  --set <key>=<value>       serve <value> in place of the effect recorded under
+                            <key>, as show prints it — "step:2#0:search=nothing
+                            found". Repeatable; the key must be below --at.
   --on-divergence <policy>  strict (default) stops when the log disagrees with
                             the loop; live executes from that point instead
 `;
@@ -35,6 +47,7 @@ const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
 const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
 const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
+const cyan = (s: string) => `\x1b[36m${s}\x1b[0m`;
 
 /** Where output goes. Injected so the commands can be tested in-process. */
 export interface Io {
@@ -66,6 +79,7 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
   const modulePath = takeOption(args, "--module");
   const atRaw = takeOption(args, "--at");
   const out = takeOption(args, "-o") ?? takeOption(args, "--out");
+  const overrides = readOverrides(takeEvery(args, "--set"));
   const onDivergence = readPolicy(takeOption(args, "--on-divergence"));
 
   const [command, ...rest] = args;
@@ -81,9 +95,9 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
     case "diff":
       return cmdDiff(io, store, rest[0], rest[1]);
     case "replay":
-      return cmdReplay(io, store, rest[0], modulePath, onDivergence);
+      return cmdReplay(io, store, rest[0], modulePath, overrides, onDivergence);
     case "fork":
-      return cmdFork(io, store, rest[0], atRaw, modulePath, onDivergence);
+      return cmdFork(io, store, rest[0], atRaw, modulePath, overrides, onDivergence);
     case "report":
       return cmdReport(io, store, rest[0], out);
     case undefined:
@@ -133,7 +147,13 @@ function cmdShow(io: Io, store: RunStore, runId: string | undefined): number {
   io.out(`${bold(runId)}  ${statusLabel(summary.status)}\n`);
   io.out(dim(`${summary.agent.name} · ${summary.agent.model} · via ${summary.provider}\n`));
   if (summary.forkedFrom) {
-    io.out(dim(`forked from ${summary.forkedFrom.runId} at step ${summary.forkedFrom.atStep}\n`));
+    const set = summary.forkedFrom.overrides ?? [];
+    io.out(
+      dim(
+        `forked from ${summary.forkedFrom.runId} at step ${summary.forkedFrom.atStep}` +
+          `${set.length > 0 ? `, with ${set.join(" and ")} set` : ""}\n`,
+      ),
+    );
   }
   io.out(`\n${dim("input")}  ${truncate(summary.input, 200)}\n\n`);
 
@@ -151,7 +171,8 @@ function printEvent(io: Io, event: RetraceEvent): void {
       const tag = padLabel(event.replayed ? green("replayed") : yellow("live"), 9);
       const timing = event.replayed ? "" : dim(` ${event.durationMs}ms`);
       const stale = event.stale ? yellow("  stale") : "";
-      io.out(`  ${tag} ${event.kind.padEnd(6)} ${dim(event.key)}${timing}${stale}\n`);
+      const set = event.overridden ? cyan("  set") : "";
+      io.out(`  ${tag} ${event.kind.padEnd(6)} ${dim(event.key)}${timing}${set}${stale}\n`);
       if (event.kind === "tool") {
         const v = event.value as { content?: string; isError?: boolean };
         io.out(`        ${v.isError ? red("error") : dim("→")} ${truncate(v.content ?? "", 120)}\n`);
@@ -240,6 +261,7 @@ async function cmdReplay(
   store: RunStore,
   runId: string | undefined,
   modulePath: string | undefined,
+  overrides: Overrides,
   onDivergence: "strict" | "live" | undefined,
 ): Promise<number> {
   if (!runId) return fail(io, "replay needs a run id");
@@ -255,6 +277,7 @@ async function cmdReplay(
     provider: mod.provider ?? LOG_ONLY,
     tools: mod.tools ?? [],
     store,
+    overrides,
     onDivergence: onDivergence ?? "strict",
     onEvent: (event) => printEvent(io, event),
   });
@@ -262,6 +285,14 @@ async function cmdReplay(
   const again = effectsOf(result.events);
   const divergedAt = firstDivergence(recorded, again);
   io.out(`\n${dim("new run")} ${result.runId}\n`);
+
+  // A replay that was told to change a value is not claiming to reproduce
+  // anything, so the comparison below would only ever report the change back.
+  if (Object.keys(overrides).length > 0) {
+    printOverridden(io, result.events);
+    printStale(io, result.events);
+    return 0;
+  }
 
   if (divergedAt !== -1) {
     io.out(
@@ -304,12 +335,23 @@ function printStale(io: Io, events: readonly RetraceEvent[]): void {
   );
 }
 
+/** What the counterfactual actually replaced, once the run has been through it. */
+function printOverridden(io: Io, events: readonly RetraceEvent[]): void {
+  const set = overriddenEffects(events);
+  if (set.length === 0) return;
+  io.out(
+    cyan(`${set.length} effect${set.length === 1 ? "" : "s"} served a value you set`) +
+      dim(` instead of the recorded one: ${set.map((e) => e.key).join(", ")}\n`),
+  );
+}
+
 async function cmdFork(
   io: Io,
   store: RunStore,
   runId: string | undefined,
   atRaw: string | undefined,
   modulePath: string | undefined,
+  overrides: Overrides,
   onDivergence: "strict" | "live" | undefined,
 ): Promise<number> {
   if (!runId) return fail(io, "fork needs a run id");
@@ -344,6 +386,7 @@ async function cmdFork(
     input: mod.input,
     budget: mod.budget,
     store,
+    overrides,
     onDivergence: onDivergence ?? "strict",
     onEvent: (event) => printEvent(io, event),
   });
@@ -352,6 +395,7 @@ async function cmdFork(
   if (result.totals.savedUsd > 0) {
     io.out(green(`the replayed prefix saved ${formatUsd(result.totals.savedUsd)}\n`));
   }
+  printOverridden(io, result.events);
   printStale(io, result.events);
   return result.status === "failed" ? 1 : 0;
 }
@@ -447,6 +491,37 @@ function takeOption(args: string[], name: string): string | undefined {
   }
   args.splice(at, 2);
   return value;
+}
+
+/** The same, for an option that may be given more than once. */
+function takeEvery(args: string[], name: string): string[] {
+  const values: string[] = [];
+  for (let value = takeOption(args, name); value !== undefined; value = takeOption(args, name)) {
+    values.push(value);
+  }
+  return values;
+}
+
+/**
+ * `--set <effect-key>=<value>`. The value is read as JSON where it parses as
+ * JSON, so a recorded number or object can be replaced with one, and taken as
+ * plain text where it doesn't — which is what a tool result usually is.
+ */
+function readOverrides(pairs: readonly string[]): Overrides {
+  const overrides: Record<string, unknown> = {};
+  for (const pair of pairs) {
+    const at = pair.indexOf("=");
+    if (at < 1) {
+      throw new Error(`--set takes "<effect-key>=<value>", got "${pair}"`);
+    }
+    const raw = pair.slice(at + 1);
+    try {
+      overrides[pair.slice(0, at)] = JSON.parse(raw);
+    } catch {
+      overrides[pair.slice(0, at)] = raw;
+    }
+  }
+  return overrides;
 }
 
 function readPolicy(value: string | undefined): "strict" | "live" | undefined {

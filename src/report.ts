@@ -45,6 +45,7 @@ export function renderReport(summary: RunSummary, events: readonly RetraceEvent[
 function masthead(summary: RunSummary, effects: readonly Effect[]): string {
   const replayed = effects.filter((e) => e.replayed).length;
   const stale = effects.filter((e) => e.stale).length;
+  const set = effects.filter((e) => e.overridden).length;
   const from = summary.forkedFrom;
 
   return section("masthead", [
@@ -59,6 +60,10 @@ function masthead(summary: RunSummary, effects: readonly Effect[]): string {
         `${escape(String(from.atStep))}</p>`
       : "",
     `<p class="lede">${lede(replayed, effects.length, summary)}</p>`,
+    set > 0
+      ? `<p class="note">${set} of them did not come back as recorded: this run was asked ` +
+        `what would happen if they were different. They are marked <em>set</em> below.</p>`
+      : "",
     stale > 0
       ? `<p class="note">${stale} of them answer a request this run no longer builds — a prompt ` +
         `or a tool changed above them. They are marked <em>stale</em> below.</p>`
@@ -332,7 +337,15 @@ function rowHead(marker: string, kind: string, key: string, durationMs: number |
 
 function mark(effect: Effect): string {
   const state = effect.replayed ? badge("replayed", "replayed") : badge("live", "live");
-  return effect.stale ? state + staleBadge() : state;
+  return state + (effect.overridden ? setBadge() : "") + (effect.stale ? staleBadge() : "");
+}
+
+/** Served from the log, but not the value the log recorded. */
+function setBadge(): string {
+  return (
+    `<span class="badge set" title="this value was substituted for the recorded ` +
+    `one — what the run saw, not what the parent recorded">set</span>`
+  );
 }
 
 /**
@@ -428,12 +441,14 @@ const STYLE = `
 :root{color-scheme:light dark;
 --paper:#faf6ef;--card:#fffdf8;--ink:#2b2620;--soft:#6d6459;--faint:#9a9083;--rule:#e7ddcc;
 --live:#a8500f;--live-bg:#f7e9da;--replayed:#436b4f;--replayed-bg:#e6ede4;--bad:#96291a;--bad-bg:#f6e2de;
+--set:#2f5b6e;--set-bg:#e1ebee;
 --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,ui-serif,serif;
 --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;
 --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
 @media (prefers-color-scheme:dark){:root{
 --paper:#16130f;--card:#1e1a15;--ink:#ece3d5;--soft:#a19685;--faint:#7d7364;--rule:#332c23;
---live:#e2954f;--live-bg:#2c2117;--replayed:#8fb48f;--replayed-bg:#1b241c;--bad:#e07a63;--bad-bg:#2b1b18}}
+--live:#e2954f;--live-bg:#2c2117;--replayed:#8fb48f;--replayed-bg:#1b241c;--bad:#e07a63;--bad-bg:#2b1b18;
+--set:#82b2c4;--set-bg:#172428}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);
 font-size:16px;line-height:1.55;-webkit-text-size-adjust:100%}
@@ -478,6 +493,7 @@ padding:.7rem .85rem;margin-bottom:.6rem}
 .badge.replayed{color:var(--replayed);background:var(--replayed-bg)}
 .badge.unrun{color:var(--bad);background:var(--bad-bg)}
 .badge.stale{color:var(--soft);border:1px dashed var(--rule);padding:0 .3rem}
+.badge.set{color:var(--set);background:var(--set-bg)}
 .tag{font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;color:var(--soft)}
 .tag.failed{color:var(--bad)}
 .kind{font-size:.8rem;color:var(--soft)}

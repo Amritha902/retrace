@@ -197,6 +197,12 @@ export interface ForkOrigin {
    * does not survive the round trip.
    */
   atStep: number | "all";
+  /**
+   * Effect keys whose recorded values this run was told to replace. Present
+   * only on a counterfactual fork; the substituted values are in the effect
+   * events themselves, marked `overridden`.
+   */
+  overrides?: string[];
 }
 
 /**
@@ -245,6 +251,12 @@ export type RetraceEvent =
        * does not cover if it shows up in a plain replay.
        */
       stale?: true;
+      /**
+       * Set when this value was served from the log having been substituted for
+       * the one recorded there. The log then holds what the run actually saw,
+       * and says that it was not what the parent recorded.
+       */
+      overridden?: true;
     }
   | { seq: number; t: number; type: "charge"; step: number; usage: Usage; costUsd: number; billedUsd: number }
   | { seq: number; t: number; type: "message"; step: number; message: Message }

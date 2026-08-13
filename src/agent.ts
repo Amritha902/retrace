@@ -187,6 +187,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
         durationMs: modelCall.durationMs,
         requestHash,
         ...(modelCall.stale ? { stale: true } : {}),
+        ...(modelCall.overridden ? { overridden: true } : {}),
       });
 
       const charged = budget.charge(response.model, response.usage, modelCall.replayed);
@@ -242,6 +243,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
           value: outcome.value,
           replayed: outcome.replayed,
           durationMs,
+          ...(outcome.overridden ? { overridden: true } : {}),
         });
         // After the tool's own event, so the log shows the container before its
         // contents.
@@ -255,6 +257,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
             value: read.value,
             replayed: read.replayed,
             durationMs: read.durationMs,
+            ...(read.overridden ? { overridden: true } : {}),
           });
         }
       };
@@ -394,6 +397,7 @@ interface RecordedRead {
   value: unknown;
   index: number;
   replayed: boolean;
+  overridden: boolean;
   durationMs: number;
 }
 
@@ -415,6 +419,7 @@ function replayedReads(outcome: EffectOutcome<ToolResult>): RecordedRead[] {
     value: e.value,
     index: e.index,
     replayed: true,
+    overridden: e.overridden === true,
     durationMs: 0,
   }));
 }

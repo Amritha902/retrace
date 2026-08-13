@@ -1,11 +1,14 @@
 import { run, type RunOptions } from "./agent.ts";
 import {
+  applyOverrides,
   deterministicEntries,
   entryOf,
   Journal,
   journalUpToStep,
   type DivergencePolicy,
   type JournalEntry,
+  type Overrides,
+  type RecordedEffect,
 } from "./journal.ts";
 import { newRunId, RunStore } from "./store.ts";
 import type {
@@ -85,6 +88,11 @@ export function staleEffects(events: readonly RetraceEvent[]) {
   return effectsOf(events).filter((e) => e.stale === true);
 }
 
+/** The effects a run served from a log after being told to change their value. */
+export function overriddenEffects(events: readonly RetraceEvent[]) {
+  return effectsOf(events).filter((e) => e.overridden === true);
+}
+
 export interface ForkOptions {
   provider: Provider;
   /**
@@ -97,6 +105,14 @@ export interface ForkOptions {
   /** Fields to change relative to the parent. This is the point of forking. */
   agent?: Partial<AgentSpec>;
   input?: string;
+  /**
+   * Values to serve in place of the recorded ones, keyed by effect key —
+   * `{ "step:2#0:search": "no results" }`. The counterfactual: the steps that
+   * run live see the substituted world, and the replayed steps between the
+   * substitution and the fork point come back marked `stale`, because their
+   * recorded answers were given to a conversation that no longer exists.
+   */
+  overrides?: Overrides;
   budget?: BudgetSpec;
   store?: RunStore;
   runId?: string;
@@ -131,10 +147,13 @@ export async function fork(parentRunId: string, options: ForkOptions): Promise<R
     throw new Error(`cannot fork "${parentRunId}": its log has no run.started event`);
   }
 
-  const recorded = effectsOf(parent);
+  const overrides = options.overrides ?? {};
+  const recorded = applyOverrides(effectsOf(parent), overrides);
   const entries: JournalEntry[] = Number.isFinite(options.atStep)
     ? journalUpToStep(recorded, options.atStep)
     : recorded.map(entryOf);
+  const keyed = deterministicEntries(recorded);
+  refuseInertOverrides(overrides, recorded, entries, keyed, options.atStep);
 
   const agent: AgentSpec = { ...started.agent, ...options.agent };
 
@@ -145,18 +164,41 @@ export async function fork(parentRunId: string, options: ForkOptions): Promise<R
     budget: options.budget ?? started.budget,
     store,
     runId: options.runId ?? newRunId("fork"),
-    journal: new Journal(
-      entries,
-      options.onDivergence ?? "strict",
-      deterministicEntries(recorded),
-    ),
+    journal: new Journal(entries, options.onDivergence ?? "strict", keyed),
     forkedFrom: {
       runId: parentRunId,
       atStep: Number.isFinite(options.atStep) ? options.atStep : "all",
+      ...(Object.keys(overrides).length > 0 ? { overrides: Object.keys(overrides).sort() } : {}),
     },
     ...(options.onEvent ? { onEvent: options.onEvent } : {}),
     ...(options.onStream ? { onStream: options.onStream } : {}),
   });
+}
+
+/**
+ * An override below the fork point replaces a value the run would have read;
+ * one at or above it replaces nothing, because those steps consult the world
+ * rather than the log. Silently doing nothing is the worst outcome for a
+ * counterfactual — you would read the result as an answer — so it is an error
+ * that says which step to fork at instead.
+ */
+function refuseInertOverrides(
+  overrides: Overrides,
+  recorded: readonly RecordedEffect[],
+  entries: readonly JournalEntry[],
+  keyed: readonly JournalEntry[],
+  atStep: number,
+): void {
+  const served = new Set([...entries, ...keyed].map((e) => e.key));
+  for (const key of Object.keys(overrides)) {
+    if (served.has(key)) continue;
+    const step = recorded.find((e) => e.key === key)?.step ?? atStep;
+    throw new Error(
+      `override "${key}" is at step ${step}, which this fork runs live — the log is ` +
+        `not consulted there, so nothing would be served in its place. Fork at step ` +
+        `${step + 1} or later to replace it.`,
+    );
+  }
 }
 
 export type ReplayOptions = Omit<ForkOptions, "atStep" | "agent" | "input">;

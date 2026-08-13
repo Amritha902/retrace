@@ -7,6 +7,7 @@ export {
   ToolNotFoundError,
 } from "./errors.ts";
 export {
+  applyOverrides,
   DETERMINISTIC_KINDS,
   deterministicEntries,
   entryOf,
@@ -16,6 +17,7 @@ export {
   type DivergencePolicy,
   type EffectOutcome,
   type JournalEntry,
+  type Overrides,
   type RecordedEffect,
 } from "./journal.ts";
 export { loadRunModule, type RunModule } from "./module.ts";
@@ -32,6 +34,7 @@ export {
   effectsOf,
   fork,
   inspect,
+  overriddenEffects,
   replay,
   staleEffects,
   summarize,

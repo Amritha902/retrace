@@ -41,6 +41,13 @@ publish contains rather than what changed since something.
   `stale` — expected in a fork below the step you changed, and a sign the loop is
   reading something the journal does not cover if it appears in a plain replay.
   Surfaced by `staleEffects(events)`, by `show`, and by the HTML report.
+- **Value overrides.** `fork(runId, { overrides: { "step:2#0:search": "no
+  results" } })` serves a value the parent never recorded, so the live steps
+  answer a changed world. The substituted effect is logged `overridden`, and the
+  replayed steps below it go `stale` off the same request digest — a
+  counterfactual that says how much of itself is still the old answer. An
+  override naming an effect the log lacks, or one at a step the fork runs live,
+  is an error rather than a silent no-op.
 
 ### The CLI
 
@@ -48,6 +55,7 @@ publish contains rather than what changed since something.
 needs nothing but the log and exits non-zero if the run failed to reproduce, so
 it works as a regression check on the loop. `fork --module <path>` supplies the
 half a log cannot hold — the tools, the provider, and any agent overrides.
+`--set <effect-key>=<value>`, on `fork` and `replay`, is the counterfactual.
 `report` writes the run as one self-contained HTML page: no JavaScript, no
 network, readable in a light or a dark browser.
 
@@ -62,7 +70,7 @@ depend on.
 
 ### Verified by
 
-120 tests that run with no network and no API key, plus two `[live]` integration
+132 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:

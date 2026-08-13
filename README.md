@@ -147,6 +147,56 @@ const again = await replay(result.runId, { provider, tools: [search] });
 // Reaches neither the model nor the tools. Same output, $0.
 ```
 
+## What if it had said something else
+
+A fork changes the agent. `overrides` changes the world it ran in: hand any
+recorded effect a different value and the run continues from there as if that
+had been the value all along.
+
+```ts
+const empty = await fork(result.runId, {
+  provider,
+  tools: [search],
+  atStep: 3,
+  overrides: { "step:2#0:search": "no results" }, // what if the corpus had nothing?
+});
+```
+
+```bash
+retrace fork demo-original --at 3 --set 'step:0#0:search=no results' --module ./agent-module.ts
+```
+
+The key is the effect key, exactly as `show` and `report` print it. A tool result
+given as bare text replaces the text and leaves the outcome a success; pass
+`{ content, isError }` to replace the whole thing, including making a tool fail
+that didn't. Model responses, timestamps, uuids and random draws take the value
+you give them as-is. The substituted value goes in the fork's log marked
+`overridden`, so the log holds what the run actually saw *and* says it was not
+what the parent recorded.
+
+Two things this refuses to do quietly. An override naming an effect the log
+doesn't hold is an error, not a no-op. So is one at a step the fork runs live —
+there is no log read there to intercept, so the tool would simply execute and
+the answer you got back would not be the answer to the question you asked.
+
+The interesting part is what happens *below* the override. Replace step 0's
+search and steps 1 and 2 still replay — they have to, that is what makes the
+prefix free — but they were recorded against a conversation that no longer
+exists, so they come back `stale`, from exactly the same request digest that
+marks a rewritten prompt:
+
+```
+$ retrace fork demo-original --at 3 --set 'step:0#0:search=no results' --module ./agent-module.ts
+...
+1 effect served a value you set instead of the recorded one: step:0#0:search
+2 replayed model calls answer a request this run no longer builds
+```
+
+That second line is the honest reading of the first. The counterfactual is real
+for step 3, which ran live against the new world; steps 1 and 2 are the old
+world's answers, kept for their price. Fork lower to make more of the run
+respond to the change, and pay for more of it.
+
 ## Time, ids and randomness
 
 A tool's second argument is the journal. Anything taken from it is recorded and
@@ -270,6 +320,7 @@ retrace cost <run-id>         # per-step spend
 retrace diff <run-a> <run-b>  # where two runs stopped agreeing
 retrace replay <run-id>       # re-run it from the log and check it reproduces
 retrace fork <run-id> --at N  # replay the steps below N, then run live
+retrace fork … --set k=v      # …serving v in place of the effect recorded at k
 retrace report <run-id>       # write the run as one self-contained HTML page
 ```
 
@@ -311,6 +362,13 @@ Named exports and a `default` object both work. The file is imported for its exp
 
 Add `--on-divergence live` to either command to treat a log that disagrees with the loop as the fork point rather than an error.
 
+`--set <effect-key>=<value>` is the counterfactual, and takes both commands. It
+is repeatable, and the value is read as JSON where it parses as JSON and as
+plain text where it doesn't — so `--set 'step:2#0:search=no results'` sets the
+text a tool returned and `--set 'step:1#0:charge/clock:0=1700000000000'` sets a
+timestamp it read. See [what if it had said something
+else](#what-if-it-had-said-something-else).
+
 ### The run as a page
 
 `report` turns a log into one HTML file — every effect, what each tool was called
@@ -325,7 +383,8 @@ There is no JavaScript in it, nothing is fetched from the network, and it reads
 in a light or a dark browser. Replayed effects are green and live ones are rust,
 which in a fork makes the shape of the thing obvious at a glance: a long calm
 prefix, then the step you changed. Anything in that prefix still answering the
-question you replaced carries a `stale` badge. The page is built from the log and nothing
+question you replaced carries a `stale` badge, and any value that came out of
+the log changed carries a `set` one. The page is built from the log and nothing
 else, so it renders the same on any machine, and rendering the same log twice
 gives you the same bytes.
 
@@ -346,10 +405,11 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 - **Streaming is a view of a model call, not an effect.** Fragments never reach the log; the message they assemble into does. A replayed step reconstructs its fragments from the log, one per content block, so you get the same text back but not the same cadence.
 - **Changing `input`, the prompt or the tools on a fork with `atStep > 0` does nothing for the replayed steps** — those model calls come from the log, which was produced with the old ones. That is the point of forking, and since it is easy to forget, the log now marks each such step `stale`: replayed, and recorded against a request this run no longer builds. Fork at 0 to change what the replayed steps saw.
 - **The digest behind `stale` covers the request, not the world.** Model, system prompt, tools, conversation, token and thinking settings — all of it. A tool that returns something different today because a database moved underneath it is not something a request digest can see.
+- **An override is a counterfactual for the steps above it and nothing else.** Replacing a value changes what the live steps see; the replayed steps between it and the fork point still come out of the log as recorded, and are marked `stale` for it. The fork's log is a truthful record of a run that answered a question its parent never asked — it is not a record of what the parent would have done, because nothing re-ran to find out.
 
 ## Status
 
-Early, and not yet on npm. The core — journal, agent loop, fork, replay, budgets, store, CLI, the clock/uuid/random effects, request digests and the `stale` marking built on them, the HTML report, streaming, and parallel tool calls — is covered by 120 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+Early, and not yet on npm. The core — journal, agent loop, fork, replay, budgets, store, CLI, the clock/uuid/random effects, request digests and the `stale` marking built on them, value overrides, the HTML report, streaming, and parallel tool calls — is covered by 132 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -357,7 +417,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 120 tests, no network, no API key
+npm test           # 132 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build
