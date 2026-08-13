@@ -15,6 +15,8 @@ import type {
   RetraceEvent,
   RunResult,
   RunStatus,
+  StreamDelta,
+  StreamEvent,
   Tool,
   ToolContext,
   UserBlock,
@@ -32,6 +34,12 @@ export interface RunOptions {
   forkedFrom?: ForkOrigin;
   /** Called for every event as it is written. Useful for live progress output. */
   onEvent?: (event: RetraceEvent) => void;
+  /**
+   * Called for each fragment of each assistant turn. Setting it puts the loop
+   * on the provider's streaming path where there is one; the log is the same
+   * either way, because what gets journaled is the assembled message.
+   */
+  onStream?: (event: StreamEvent) => void;
 }
 
 export function defineAgent(spec: Partial<AgentSpec> & { name: string }): AgentSpec {
@@ -61,6 +69,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
     budget: budgetSpec = {},
     store = new RunStore(),
     onEvent,
+    onStream,
   } = options;
 
   const runId = options.runId ?? newRunId();
@@ -103,20 +112,35 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
       budget.countStep();
       emit({ type: "step.started", step });
 
+      const request = {
+        model: agent.model,
+        system: agent.system,
+        // A copy: the loop keeps mutating `messages`, and a provider that
+        // held the live array would see turns that hadn't happened yet.
+        messages: [...messages],
+        tools: schemas,
+        maxTokens: agent.maxTokens,
+        effort: agent.effort,
+        thinking: agent.thinking,
+      };
+      const stream = onStream && provider.stream ? provider.stream.bind(provider) : undefined;
       const modelCall = await journal.effect<ModelResponse>("model", `step:${step}`, () =>
-        provider.complete({
-          model: agent.model,
-          system: agent.system,
-          // A copy: the loop keeps mutating `messages`, and a provider that
-          // held the live array would see turns that hadn't happened yet.
-          messages: [...messages],
-          tools: schemas,
-          maxTokens: agent.maxTokens,
-          effort: agent.effort,
-          thinking: agent.thinking,
-        }),
+        stream && onStream
+          ? stream(request, (delta) => onStream({ step, replayed: false, delta }))
+          : provider.complete(request),
       );
       const response = modelCall.value;
+
+      // The stream is a view of the model call, never an effect of its own, so
+      // the log holds the assembled message and nothing more. That leaves the
+      // fragments to be reconstructed here for a caller that wanted them but
+      // didn't get them off the wire — a replayed step, or a provider with no
+      // streaming path. Coarser than the live version, and the same text.
+      if (onStream && (modelCall.replayed || stream === undefined)) {
+        for (const delta of fragmentsOf(response.content)) {
+          onStream({ step, replayed: modelCall.replayed, delta });
+        }
+      }
 
       emit({
         type: "effect",
@@ -321,6 +345,15 @@ function toolContext(
     uuid: () => take("uuid", () => randomUUID()),
     random: () => take("random", () => Math.random()),
   };
+}
+
+/** An assembled turn, cut back into the fragments a stream would have produced. */
+function fragmentsOf(content: ContentBlock[]): StreamDelta[] {
+  return content.map((block) => {
+    if (block.type === "text") return { kind: "text", text: block.text };
+    if (block.type === "thinking") return { kind: "thinking", thinking: block.thinking };
+    return { kind: "tool_use", id: block.id, name: block.name };
+  });
 }
 
 function textOf(content: ContentBlock[]): string {

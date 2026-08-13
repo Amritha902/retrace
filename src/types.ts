@@ -106,9 +106,38 @@ export interface ModelResponse {
   raw?: unknown;
 }
 
+/**
+ * A fragment of an assistant turn, handed over as it is produced.
+ *
+ * Deltas are a *view* of a model call, not an effect of their own: the journal
+ * records the assembled message and nothing else, so the token stream never
+ * reaches the log. That is what keeps a streamed run and an unstreamed one
+ * byte-identical on disk, and lets a replay reproduce the fragments offline.
+ *
+ * A tool call is announced when its block opens; its input arrives whole, in
+ * the final message, because partial JSON is not something a caller can use.
+ */
+export type StreamDelta =
+  | { kind: "text"; text: string }
+  | { kind: "thinking"; thinking: string }
+  | { kind: "tool_use"; id: string; name: string };
+
+export interface StreamEvent {
+  step: number;
+  /** True when the fragment was reconstructed from the log rather than streamed. */
+  replayed: boolean;
+  delta: StreamDelta;
+}
+
 export interface Provider {
   readonly name: string;
   complete(request: ModelRequest): Promise<ModelResponse>;
+  /**
+   * Optional. Returns exactly what `complete` would, having handed each
+   * fragment to `onDelta` on the way. A provider that omits this still works
+   * with a streaming caller — the loop delivers the finished turn in one go.
+   */
+  stream?(request: ModelRequest, onDelta: (delta: StreamDelta) => void): Promise<ModelResponse>;
 }
 
 /** What the agent is: model, instructions, tools, limits. Serialized into the log. */

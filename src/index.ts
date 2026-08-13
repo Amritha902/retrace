@@ -19,7 +19,13 @@ export {
 export { loadRunModule, type RunModule } from "./module.ts";
 export { formatUsd, getRate, priceUsage, setRate, type RateCard } from "./pricing.ts";
 export { AnthropicProvider, type AnthropicProviderOptions } from "./providers/anthropic.ts";
-export { MockProvider, text, toolUse, type ScriptedTurn } from "./providers/mock.ts";
+export {
+  MockProvider,
+  StreamingMockProvider,
+  text,
+  toolUse,
+  type ScriptedTurn,
+} from "./providers/mock.ts";
 export {
   effectsOf,
   fork,

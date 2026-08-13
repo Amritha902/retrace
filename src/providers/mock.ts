@@ -4,6 +4,7 @@ import type {
   ModelResponse,
   Provider,
   StopReason,
+  StreamDelta,
   Usage,
 } from "../types.ts";
 
@@ -23,6 +24,8 @@ export interface ScriptedTurn {
 export class MockProvider implements Provider {
   readonly name = "mock";
   readonly calls: ModelRequest[] = [];
+  /** How many of those calls arrived on the streaming path. */
+  streamedCalls = 0;
   private turn = 0;
   private readonly script: ScriptedTurn[];
 
@@ -56,6 +59,36 @@ export class MockProvider implements Provider {
       },
     };
   }
+}
+
+/**
+ * The scripted turn, handed over a word at a time. Nothing here is timed — the
+ * point is that a caller wiring up a stream sees more than one fragment, and
+ * that the assembled result is identical to `complete`'s.
+ */
+export class StreamingMockProvider extends MockProvider {
+  async stream(
+    request: ModelRequest,
+    onDelta: (delta: StreamDelta) => void,
+  ): Promise<ModelResponse> {
+    const response = await this.complete(request);
+    this.streamedCalls += 1;
+    for (const block of response.content) {
+      if (block.type === "text") {
+        for (const word of words(block.text)) onDelta({ kind: "text", text: word });
+      } else if (block.type === "thinking") {
+        for (const word of words(block.thinking)) onDelta({ kind: "thinking", thinking: word });
+      } else {
+        onDelta({ kind: "tool_use", id: block.id, name: block.name });
+      }
+    }
+    return response;
+  }
+}
+
+/** Words with their trailing spaces, so concatenating them restores the text. */
+function words(s: string): string[] {
+  return s.match(/\S+\s*/g) ?? [];
 }
 
 export function text(s: string): ContentBlock {

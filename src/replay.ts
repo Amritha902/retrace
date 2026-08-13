@@ -93,6 +93,12 @@ export interface ForkOptions {
    */
   onDivergence?: DivergencePolicy;
   onEvent?: RunOptions["onEvent"];
+  /**
+   * Fragments of each assistant turn. Steps served from the log deliver theirs
+   * reconstructed and flagged `replayed`, so a fork renders the same way above
+   * and below its fork point.
+   */
+  onStream?: RunOptions["onStream"];
 }
 
 /**
@@ -135,6 +141,7 @@ export async function fork(parentRunId: string, options: ForkOptions): Promise<R
       atStep: Number.isFinite(options.atStep) ? options.atStep : "all",
     },
     ...(options.onEvent ? { onEvent: options.onEvent } : {}),
+    ...(options.onStream ? { onStream: options.onStream } : {}),
   });
 }
 
