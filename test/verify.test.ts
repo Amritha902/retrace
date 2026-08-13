@@ -325,6 +325,186 @@ test("a fork whose parent is gone is unverified in one respect rather than faile
   assert.match(checkNamed(report, "parent").detail, /"baseline"\) is not in this store/);
 });
 
+/** A store holding exactly these logs, so a lineage can be given holes on purpose. */
+function storeOf(runs: Record<string, readonly RetraceEvent[]>): MemoryStore {
+  const store = new MemoryStore();
+  for (const [runId, events] of Object.entries(runs)) {
+    for (const event of events) store.append(runId, event);
+  }
+  return store;
+}
+
+/** baseline, then `depth` forks each taken from the one before it at step 2. */
+async function chain(store: MemoryStore, depth: number): Promise<string[]> {
+  await recordBaseline(store);
+  const ids = ["baseline"];
+  for (let i = 1; i <= depth; i++) {
+    const runId = `fork-${i}`;
+    await fork(ids[i - 1] as string, {
+      provider: new MockProvider(answer()),
+      tools: [lookup],
+      atStep: 2,
+      store,
+      runId,
+    });
+    ids.push(runId);
+  }
+  return ids;
+}
+
+test("a fork of a fork traces what it got free back to the run that executed it", async () => {
+  const store = new MemoryStore();
+  await chain(store, 3);
+
+  const report = verifyRun("fork-3", store);
+
+  assertPasses(report);
+  // Its parent is fork-2, which paid for none of this either. Only the run at
+  // the end of the chain ever reached a model or a tool.
+  assert.match(checkNamed(report, "parent").detail, /4 replayed effects are fork-2's/);
+  assert.match(
+    checkNamed(report, "lineage").detail,
+    /4 free effects trace back 3 runs to baseline, which executed and paid for them/,
+  );
+});
+
+test("a log claiming a free prefix it came by from nowhere fails", async () => {
+  const store = new MemoryStore();
+  await recordBaseline(store);
+  const forked = await fork("baseline", {
+    provider: new MockProvider(answer()),
+    tools: [lookup],
+    atStep: 2,
+    store,
+    runId: "forked",
+  });
+
+  // Drop the one line saying where the free prefix came from. Everything else
+  // about the log is untouched, including the $0 it billed for four effects.
+  const orphaned = tampered(
+    forked.events,
+    (e) => e.type === "run.started",
+    (e) => {
+      if (e.type === "run.started") delete e.forkedFrom;
+    },
+  );
+
+  const report = verifyEvents("forked", orphaned, store);
+
+  assert.equal(report.ok, false);
+  assert.equal(checkNamed(report, "parent").status, "skipped", "with no origin there is no parent to check");
+  assert.match(
+    checkNamed(report, "lineage").detail,
+    /4 effects came out of a log, but this run records no run to have come from/,
+  );
+});
+
+test("a value doctored in the middle of a lineage passes its child and fails the chain", async () => {
+  const store = new MemoryStore();
+  await chain(store, 2);
+
+  // Rewrite the same effect in fork-1 and fork-2, so the two agree with each
+  // other and only the run that actually executed it disagrees. This is the
+  // failure the one-hop check cannot see: fork-2's prefix really is fork-1's.
+  const forge = (events: readonly RetraceEvent[]) =>
+    tampered(
+      events,
+      (e) => e.type === "effect" && e.key === "step:1#0:lookup",
+      (e) => {
+        if (e.type === "effect") e.value = { content: "definition of something else", isError: false };
+      },
+    );
+
+  const doctored = storeOf({
+    baseline: store.read("baseline"),
+    "fork-1": forge(store.read("fork-1")),
+    "fork-2": forge(store.read("fork-2")),
+  });
+
+  const report = verifyEvents("fork-2", doctored.read("fork-2"), doctored);
+
+  assert.equal(checkNamed(report, "parent").status, "ok", "the doctored pair agree with each other");
+  assert.equal(report.ok, false);
+  assert.match(
+    checkNamed(report, "lineage").detail,
+    /baseline records a different value for tool:step:1#0:lookup than fork-1, which took it from there/,
+  );
+});
+
+test("a lineage that runs out of this store is traced as far as it goes", async () => {
+  const store = new MemoryStore();
+  await chain(store, 2);
+
+  // fork-2 and its parent, read somewhere the run that paid for any of it never
+  // reached — an ordinary way to receive a fork, and not evidence of anything.
+  const partial = storeOf({ "fork-1": store.read("fork-1"), "fork-2": store.read("fork-2") });
+  const report = verifyEvents("fork-2", partial.read("fork-2"), partial);
+
+  assert.equal(report.ok, true);
+  assert.equal(report.complete, false);
+  assert.equal(checkNamed(report, "parent").status, "ok", "the hop this store can see holds");
+  assert.equal(checkNamed(report, "lineage").status, "skipped");
+  assert.match(
+    checkNamed(report, "lineage").detail,
+    /nothing this run got free can be traced to the run that ran it: the trail stops where "baseline" is not in this store/,
+  );
+});
+
+test("a run that is its own ancestor is refused rather than followed", async () => {
+  const store = new MemoryStore();
+  await chain(store, 1);
+
+  const looped = storeOf({
+    // baseline now claims to have been forked from the run that was forked from it.
+    baseline: tampered(
+      store.read("baseline"),
+      (e) => e.type === "run.started",
+      (e) => {
+        if (e.type === "run.started") e.forkedFrom = { runId: "fork-1", atStep: 0 };
+      },
+    ),
+    "fork-1": store.read("fork-1"),
+  });
+
+  const report = verifyEvents("fork-1", looped.read("fork-1"), looped);
+
+  assert.equal(report.ok, false);
+  assert.match(
+    checkNamed(report, "lineage").detail,
+    /"baseline" is its own ancestor, which no sequence of forks produces/,
+  );
+});
+
+test("a substituted value an ancestor invented is traced to nothing, and said so", async () => {
+  const store = new MemoryStore();
+  await recordBaseline(store);
+  await fork("baseline", {
+    provider: new MockProvider(answer()),
+    tools: [lookup],
+    atStep: 2,
+    overrides: { "step:0#0:lookup": "no results" },
+    store,
+    runId: "counterfactual",
+  });
+  await fork("counterfactual", {
+    provider: new MockProvider(answer()),
+    tools: [lookup],
+    atStep: 2,
+    store,
+    runId: "downstream",
+  });
+
+  const report = verifyRun("downstream", store);
+
+  assertPasses(report);
+  // Three of its four free effects were executed by baseline. The fourth never
+  // existed anywhere: the run above it made the value up, which is the point.
+  assert.match(
+    checkNamed(report, "lineage").detail,
+    /3 free effects trace back 2 runs to baseline, which executed and paid for them; 1 more carries a value substituted somewhere in this lineage rather than executed anywhere in it/,
+  );
+});
+
 function tempDir(t: TestContext): string {
   const dir = mkdtempSync(join(tmpdir(), "retrace-verify-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -366,7 +546,7 @@ test("the CLI reports every check and exits zero when they hold", async (t) => {
 
   assert.equal(code, 0, io.errors());
   assert.match(io.text(), /forked from baseline at step 2/);
-  for (const name of ["shape", "accounting", "free replay", "markings", "parent"]) {
+  for (const name of ["shape", "accounting", "free replay", "markings", "parent", "lineage"]) {
     assert.match(io.text(), new RegExp(`ok\\s+${name}\\s`));
   }
   assert.match(io.text(), /verified: this log holds up against everything it claims/);

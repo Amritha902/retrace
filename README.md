@@ -216,6 +216,13 @@ you give them as-is. The substituted value goes in the fork's log marked
 `overridden`, so the log holds what the run actually saw *and* says it was not
 what the parent recorded.
 
+The mark stays on the run that was given the instruction. Fork *that* run and the
+value is inherited like any other recorded value — a descendant claiming a
+substitution nobody asked it for would be saying something false about itself —
+so the substitution stays on record where it was made, and
+[`verify`'s lineage check](#checking-a-log-against-itself) is what finds it from
+further down.
+
 Two things this refuses to do quietly. An override naming an effect the log
 doesn't hold is an error, not a no-op. So is one at a step the fork runs live —
 there is no log read there to intercept, so the tool would simply execute and
@@ -468,6 +475,7 @@ forked from demo-original at step 3
   ok   free replay  6 of 7 effects came out of the log, and none of them was billed
   ok   markings     3 stale, 0 substituted, all of them served from the log
   ok   parent       6 replayed effects are demo-original's, value for value
+  ok   lineage      6 free effects trace back to demo-original, which executed and paid for them
 
 verified: this log holds up against everything it claims
 ```
@@ -480,11 +488,36 @@ charges add up to the totals it reports, nothing served from the log was billed
 or claims to have taken time, and nothing that executed is marked `stale` or
 `overridden`.
 
-It reads two logs and executes nothing, so it says the same thing about a run
+`lineage` asks the question one hop up cannot answer: *who actually paid*. Fork a
+fork of a fork — the ordinary shape of this, since the whole point is to keep
+re-entering the same run — and every one of them claims the same prefix as free,
+each on the strength of a log that only ever points one hop back. So the check
+follows each free effect up the chain until it reaches the run that executed it,
+comparing values at every hop on the way:
+
+```
+  ok   lineage      4 free effects trace back 3 runs to demo-original, which executed and paid for them
+```
+
+Three things live here and nowhere else. A value doctored in the *middle* of a
+lineage passes `parent` at both ends — the child agrees with the log it was
+forked from — and disagrees with the run that produced it. A log with a free
+prefix and no parent to have taken it from is a saving nothing accounts for, and
+without an origin there is no parent to check. And a fork that inherits a value
+an ancestor [made up](#what-if-it-had-said-something-else) traces back to that
+substitution rather than to an execution, and is counted apart from the rest:
+
+```
+  ok   lineage      3 free effects trace back 2 runs to demo-original, which executed and
+                    paid for them; 1 more carries a value substituted somewhere in this
+                    lineage rather than executed anywhere in it
+```
+
+It reads logs and executes nothing, so it says the same thing about a run
 recorded on another machine a year ago, and it exits non-zero on a failed check.
-A check it cannot run — a fork whose parent is not in this store, a killed run
-with no totals yet — comes back skipped rather than passed, and the last line
-says how much of the verification that leaves undone. In code it is
+A check it cannot run — a lineage that leaves this store, a killed run with no
+totals yet — comes back skipped rather than passed, traced as far as it goes, and
+the last line says how much of the verification that leaves undone. In code it is
 `verifyRun(runId)`.
 
 ## Storage
@@ -506,15 +539,18 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 - **Changing `input`, the prompt or the tools on a fork with `atStep > 0` does nothing for the replayed steps** — those model calls come from the log, which was produced with the old ones. That is the point of forking, and since it is easy to forget, the log now marks each such step `stale`: replayed, and recorded against a request this run no longer builds. Fork at 0 to change what the replayed steps saw.
 - **The digest behind `stale` covers the request, not the world.** Model, system prompt, tools, conversation, token and thinking settings — all of it. A tool that returns something different today because a database moved underneath it is not something a request digest can see.
 - **`verify` checks the log against the log.** It proves that a fork's free
-  prefix is the prefix its parent recorded and that the money adds up to the
+  prefix is the prefix its parent recorded, that following the chain up leads to
+  a run that executed and was billed for it, and that the money adds up to the
   savings claimed. It cannot tell you the recorded values were the right
   answers, or that a tool asked the same question today would still say the same
-  thing — nothing that reads only a log can.
+  thing — nothing that reads only a log can. And it can only follow a lineage as
+  far as the logs it has: a chain that leaves the store is traced to that point
+  and reported skipped, not passed.
 - **An override is a counterfactual for the steps above it and nothing else.** Replacing a value changes what the live steps see; the replayed steps between it and the fork point still come out of the log as recorded, and are marked `stale` for it. The fork's log is a truthful record of a run that answered a question its parent never asked — it is not a record of what the parent would have done, because nothing re-ran to find out.
 
 ## Status
 
-Early, and not yet on npm. The core — journal, agent loop, fork, replay, resume, budgets, store, CLI, the clock/uuid/random effects, request digests and the `stale` marking built on them, value overrides, the HTML report, streaming, parallel tool calls, and the `verify` audit — is covered by 161 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+Early, and not yet on npm. The core — journal, agent loop, fork, replay, resume, budgets, store, CLI, the clock/uuid/random effects, request digests and the `stale` marking built on them, value overrides, the HTML report, streaming, parallel tool calls, and the `verify` audit — is covered by 167 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -522,7 +558,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 161 tests, no network, no API key
+npm test           # 167 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

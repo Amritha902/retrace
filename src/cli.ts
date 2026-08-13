@@ -29,8 +29,8 @@ const USAGE = `retrace — inspect and re-run recorded agent runs
   retrace fork <run-id> --at N  replay the steps below N, then run live
   retrace resume <run-id>       carry on a run that stopped early, from its log
   retrace report <run-id>       write the run as one self-contained HTML page
-  retrace verify <run-id>       check the log against its own claims, and a
-                                fork's free prefix against the run it came from
+  retrace verify <run-id>       check the log against its own claims, and what it
+                                got free against the runs that executed and paid
 
 Options
   --dir <path>              store directory (default: ${DEFAULT_STORE_DIR})
@@ -523,8 +523,8 @@ function cmdReport(
 }
 
 /**
- * Reads two logs at most and executes nothing, so it says the same thing about
- * a run wherever that run is read — which is the only way the claim is worth
+ * Reads logs and executes nothing, so it says the same thing about a run
+ * wherever that run is read — which is the only way the claim is worth
  * anything. Exits non-zero on a failed check so it can gate a pipeline.
  */
 function cmdVerify(io: Io, store: RunStore, runId: string | undefined): number {

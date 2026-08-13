@@ -162,7 +162,7 @@ async function reenter(
   }
 
   const overrides = options.overrides ?? {};
-  const recorded = applyOverrides(effectsOf(parent), overrides);
+  const recorded = applyOverrides(inherited(effectsOf(parent)), overrides);
   const entries: JournalEntry[] = Number.isFinite(options.atStep)
     ? journalUpToStep(recorded, options.atStep)
     : recorded.map(entryOf);
@@ -188,6 +188,20 @@ async function reenter(
     ...(options.onEvent ? { onEvent: options.onEvent } : {}),
     ...(options.onStream ? { onStream: options.onStream } : {}),
   });
+}
+
+/**
+ * A parent's effects as raw material for this run.
+ *
+ * `overridden` records that a run was told to serve a value its own parent
+ * never recorded. Fork that run and the value is inherited like any other
+ * recorded value — but not the instruction, which was given to somebody else.
+ * Carrying the mark down would have every descendant claiming a substitution it
+ * was never asked for; the substitution stays on record in the log where it was
+ * made, and `verify`'s lineage check is what finds it from further down.
+ */
+function inherited(effects: readonly RecordedEffect[]): RecordedEffect[] {
+  return effects.map(({ overridden, ...effect }) => effect);
 }
 
 /**

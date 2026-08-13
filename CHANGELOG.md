@@ -63,8 +63,18 @@ publish contains rather than what changed since something.
   executed is marked `stale` or `overridden`. And, for a fork, every effect it
   served from the log is looked up in the run it says it came from and compared
   value for value — the claim a fork's own log cannot make, and the one the free
-  prefix rests on. A check with nothing to run against comes back skipped rather
-  than passed.
+  prefix rests on. Then `lineage` follows each of those effects the rest of the
+  way up: through a fork of a fork of a fork, comparing values at every hop,
+  until it reaches the run that executed and was billed for it. A free prefix
+  with no parent to have come from, a value doctored in the middle of a lineage —
+  which agrees with its child and only disagrees with the run that produced it —
+  and a run that is its own ancestor all fail there and nowhere else. A check
+  with nothing to run against comes back skipped rather than passed, and a
+  lineage that leaves the store is traced as far as it goes.
+- **A substituted value is marked on the run that was told to substitute it,**
+  and not on its descendants. A fork of a counterfactual inherits the value like
+  any other recorded value; the `overridden` mark stays in the log where the
+  instruction was given, and `lineage` is what finds it from further down.
 
 ### The CLI
 
@@ -92,7 +102,7 @@ depend on.
 
 ### Verified by
 
-161 tests that run with no network and no API key, plus two `[live]` integration
+167 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:

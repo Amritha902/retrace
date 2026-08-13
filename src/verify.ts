@@ -37,12 +37,17 @@ export interface VerifyReport {
  * looked up in the run it says it forked from and compared value for value. A
  * free prefix that is not the parent's prefix is the one failure that would
  * invalidate everything else, and it is invisible in the fork's own log.
+ *
+ * `lineage` asks the question one hop up cannot answer — who actually paid.
  */
 export function verifyRun(runId: string, store: RunStore = new RunStore()): VerifyReport {
   return verifyEvents(runId, store.read(runId), store);
 }
 
-/** The same, from events already in hand. `store` is only read to find a parent. */
+/**
+ * The same, from events already in hand. `store` is only read to find the runs
+ * this one inherited from.
+ */
 export function verifyEvents(
   runId: string,
   events: readonly RetraceEvent[],
@@ -57,6 +62,7 @@ export function verifyEvents(
     checkFreeReplay(events),
     checkMarkings(events, origin),
     checkParent(events, origin, store),
+    checkLineage(runId, events, origin, store),
   ];
 
   return {
@@ -374,6 +380,193 @@ function checkParent(
     `${matched} replayed effect${matched === 1 ? " is" : "s are"} ${origin.runId}'s, value for value` +
       (substituted === 0 ? "" : `; ${substituted} substituted on purpose`),
   );
+}
+
+/**
+ * Follow every free effect back to the run that ran it.
+ *
+ * `parent` proves a fork's prefix is its parent's. It says nothing about where
+ * the *parent* got it, and a fork of a fork of a fork is the normal shape of
+ * this thing: keep re-forking the same run and the money is claimed as saved
+ * every time, on the strength of a log that only ever points one hop back. Read
+ * the chain to its end and the claim becomes checkable — each free effect either
+ * arrives at a run that executed and was billed for it, or it doesn't exist.
+ *
+ * Two failures live here and nowhere else. A log with a free prefix and no
+ * parent to have taken it from is a saving nothing accounts for. And a value
+ * altered in the middle of a lineage passes `parent` at both ends — the child
+ * agrees with the doctored log it was forked from — while disagreeing with the
+ * run that produced it. A third, a run that turns out to be its own ancestor,
+ * is not something the runtime can produce at all, so finding one is enough.
+ */
+function checkLineage(
+  runId: string,
+  events: readonly RetraceEvent[],
+  origin: ForkOrigin | undefined,
+  store: RunStore | undefined,
+): Check {
+  const name = "lineage";
+  const free = effectsOf(events).filter((e) => e.replayed);
+
+  if (origin === undefined) {
+    return free.length === 0
+      ? ok(name, "every effect here executed here, so none of this run is owed to another")
+      : failed(
+          name,
+          `${plural(free.length, "effect")} came out of a log, but this run records no run to have ` +
+            `come from — nothing accounts for the work it did not pay for`,
+        );
+  }
+  if (free.length === 0) {
+    return ok(name, `nothing was served from ${origin.runId}'s log, so this run inherited nothing`);
+  }
+  if (store === undefined) return skipped(name, `no store to trace ${origin.runId} back through`);
+
+  const ancestry = ancestryOf(origin.runId, store);
+  if (ancestry.broken !== undefined) return failed(name, ancestry.broken);
+
+  const executedBy = new Set<string>();
+  let executed = 0;
+  let substituted = 0;
+  let untraced = 0;
+
+  for (const effect of free) {
+    // Substituted here on purpose: this run was asked for a value its lineage
+    // never held, so there is nothing upstream for it to agree with.
+    if (effect.overridden) {
+      substituted++;
+      continue;
+    }
+    const trail = trace(runId, effect, ancestry);
+    if (trail.kind === "failed") return failed(name, trail.detail);
+    if (trail.kind === "untraced") untraced++;
+    else if (trail.kind === "substituted") substituted++;
+    else {
+      executed++;
+      executedBy.add(trail.runId);
+    }
+  }
+
+  if (untraced > 0) {
+    const traced =
+      executed === 0
+        ? "nothing this run got free can be traced to the run that ran it"
+        : `${executed} of ${free.length} free effects trace back to ${[...executedBy].sort().join(", ")}`;
+    return skipped(name, `${traced}: the trail stops where ${ancestry.incomplete}`);
+  }
+  if (executed === 0) {
+    return ok(
+      name,
+      "every free effect here inherits a substituted value, so nothing in this lineage ever ran one",
+    );
+  }
+
+  const depth = ancestry.chain.length === 1 ? "" : ` ${plural(ancestry.chain.length, "run")}`;
+  return ok(
+    name,
+    `${plural(executed, "free effect")} trace back${depth} to ${[...executedBy].sort().join(", ")}, ` +
+      `which executed and paid for ${executed === 1 ? "it" : "them"}` +
+      (substituted === 0
+        ? ""
+        : `; ${substituted} more ${substituted === 1 ? "carries a value" : "carry values"} substituted ` +
+          `somewhere in this lineage rather than executed anywhere in it`),
+  );
+}
+
+/** One run in a lineage, with its effects indexed the way a trace looks them up. */
+interface Ancestor {
+  runId: string;
+  effects: ReadonlyMap<string, Effect>;
+}
+
+interface Ancestry {
+  /** Nearest first: the parent, then its parent, up to a run that ran everything itself. */
+  chain: Ancestor[];
+  /** Why the walk stopped short of such a run — a log this store does not hold. */
+  incomplete?: string;
+  /** Something no sequence of forks could have produced. */
+  broken?: string;
+}
+
+function ancestryOf(parentRunId: string, store: RunStore): Ancestry {
+  const chain: Ancestor[] = [];
+  const seen = new Set<string>();
+  let next: string | undefined = parentRunId;
+
+  while (next !== undefined) {
+    if (seen.has(next)) {
+      return {
+        chain,
+        broken: `"${next}" is its own ancestor, which no sequence of forks produces`,
+      };
+    }
+    seen.add(next);
+    if (!store.exists(next)) return { chain, incomplete: `"${next}" is not in this store` };
+
+    let events: readonly RetraceEvent[];
+    try {
+      events = store.read(next);
+    } catch (cause) {
+      return { chain, incomplete: `"${next}" could not be read: ${describe(cause)}` };
+    }
+
+    const started = events.find((e) => e.type === "run.started");
+    const origin = started?.type === "run.started" ? started.forkedFrom : undefined;
+    chain.push({
+      runId: next,
+      effects: new Map(effectsOf(events).map((e) => [`${e.kind}:${e.key}`, e])),
+    });
+    next = origin?.runId;
+  }
+
+  return { chain };
+}
+
+type Trail =
+  | { kind: "executed"; runId: string }
+  | { kind: "substituted" }
+  | { kind: "untraced" }
+  | { kind: "failed"; detail: string };
+
+/**
+ * Walk one effect up the chain. Each run either ran it — in which case that is
+ * where it came from — or was handed it by the run above, in which case the two
+ * had better hold the same value.
+ */
+function trace(runId: string, effect: Effect, ancestry: Ancestry): Trail {
+  const lookup = `${effect.kind}:${effect.key}`;
+  let below = { runId, value: effect.value };
+
+  for (const ancestor of ancestry.chain) {
+    const recorded = ancestor.effects.get(lookup);
+    if (recorded === undefined) {
+      return {
+        kind: "failed",
+        detail: `${lookup} was served from the log, but ${ancestor.runId} in this run's lineage records no such effect`,
+      };
+    }
+    if (fingerprint(recorded.value) !== fingerprint(below.value)) {
+      return {
+        kind: "failed",
+        detail: `${ancestor.runId} records a different value for ${lookup} than ${below.runId}, which took it from there`,
+      };
+    }
+    if (recorded.overridden) return { kind: "substituted" };
+    if (!recorded.replayed) return { kind: "executed", runId: ancestor.runId };
+    below = { runId: ancestor.runId, value: recorded.value };
+  }
+
+  if (ancestry.incomplete !== undefined) return { kind: "untraced" };
+  return {
+    kind: "failed",
+    detail:
+      `${lookup} is free in every run back to ${below.runId}, which records no run to have come ` +
+      `from — nothing in this lineage ever executed it`,
+  };
+}
+
+function plural(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
 }
 
 function describe(cause: unknown): string {
