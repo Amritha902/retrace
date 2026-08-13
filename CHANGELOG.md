@@ -56,16 +56,28 @@ publish contains rather than what changed since something.
   override naming an effect the log lacks, or one at a step the fork runs live,
   is an error rather than a silent no-op.
 
+- **`verifyRun(runId)`.** Holds a log to the claims it makes about itself, from
+  the logs alone — no provider, no tools, no network. The effect sequence is
+  dense and in order; the charges add up to the totals the run reports; nothing
+  served from the log was billed or claims to have taken time; nothing that
+  executed is marked `stale` or `overridden`. And, for a fork, every effect it
+  served from the log is looked up in the run it says it came from and compared
+  value for value — the claim a fork's own log cannot make, and the one the free
+  prefix rests on. A check with nothing to run against comes back skipped rather
+  than passed.
+
 ### The CLI
 
-`retrace ls`, `show`, `cost`, `diff`, `replay`, `fork`, `resume` and `report`.
+`retrace ls`, `show`, `cost`, `diff`, `replay`, `fork`, `resume`, `report` and
+`verify`.
 `replay` needs nothing but the log and exits non-zero if the run failed to
 reproduce, so it works as a regression check on the loop. `fork --module <path>`
 and `resume --module <path>` supply the half a log cannot hold — the tools, the
 provider, and any agent overrides.
 `--set <effect-key>=<value>`, on `fork` and `replay`, is the counterfactual.
 `report` writes the run as one self-contained HTML page: no JavaScript, no
-network, readable in a light or a dark browser.
+network, readable in a light or a dark browser. `verify` prints one line per
+check and exits non-zero on a failure, so it can gate a pipeline.
 
 ### Storage and providers
 
@@ -80,7 +92,7 @@ depend on.
 
 ### Verified by
 
-146 tests that run with no network and no API key, plus two `[live]` integration
+161 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:

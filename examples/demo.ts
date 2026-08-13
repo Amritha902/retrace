@@ -22,6 +22,7 @@ import {
   text,
   tool,
   toolUse,
+  verifyRun,
 } from "../src/index.ts";
 
 let searches = 0;
@@ -128,11 +129,21 @@ console.log(
     `${staleEffects(counterfactual.events).length} replayed steps now answer the old world\n`,
 );
 
+console.log("5. and none of the above is taken on trust\n");
+// Every number printed so far came out of a log that also wrote the numbers.
+// This reads the fork's log against the original's and checks the two agree,
+// effect for effect — the one claim a fork's own log cannot make for itself.
+for (const check of verifyRun("demo-forked", store).checks) {
+  console.log(`   ${check.status.padEnd(6)} ${check.name.padEnd(12)} ${check.detail}`);
+}
+console.log();
+
 const saving = 1 - forked.totals.billedUsd / original.totals.billedUsd;
 console.log(
   `Retrying the last step cost ${(saving * 100).toFixed(0)}% less than re-running from scratch.`,
 );
 console.log(
   "\nNow try:  npx retrace show demo-forked   ·   npx retrace diff demo-original demo-forked" +
-    "\n          npx retrace report demo-forked -o trace.html",
+    "\n          npx retrace report demo-forked -o trace.html" +
+    "\n          npx retrace verify demo-forked",
 );

@@ -365,6 +365,7 @@ retrace fork <run-id> --at N  # replay the steps below N, then run live
 retrace fork … --set k=v      # …serving v in place of the effect recorded at k
 retrace resume <run-id>       # carry on a run that stopped early, from its log
 retrace report <run-id>       # write the run as one self-contained HTML page
+retrace verify <run-id>       # hold the log to its own claims, and to its parent
 ```
 
 `diff` is the one to reach for after a fork — it shows exactly which effect the two runs stopped sharing.
@@ -448,6 +449,44 @@ the log changed carries a `set` one. The page is built from the log and nothing
 else, so it renders the same on any machine, and rendering the same log twice
 gives you the same bytes.
 
+### Checking a log against itself
+
+A fork bills nothing for its prefix because the prefix came out of the parent.
+Read on its own, though, a fork's log only shows a run that did a great deal of
+work for free — nothing in it says the work is the same work.
+
+```bash
+retrace verify demo-forked
+```
+
+```
+demo-forked  completed
+forked from demo-original at step 3
+
+  ok   shape        24 events, 7 effects, indices dense and in order
+  ok   accounting   $0.9200 at list price, $0.2300 billed, $0.6900 saved — the charges add up
+  ok   free replay  6 of 7 effects came out of the log, and none of them was billed
+  ok   markings     3 stale, 0 substituted, all of them served from the log
+  ok   parent       6 replayed effects are demo-original's, value for value
+
+verified: this log holds up against everything it claims
+```
+
+`parent` is the one worth having. Every effect this run served from the log is
+looked up in the run it says it came from and compared value for value, so an
+edited prefix, a spliced log or a fork pointed at the wrong parent stops being
+something you take on trust. The rest hold the log to its own arithmetic: the
+charges add up to the totals it reports, nothing served from the log was billed
+or claims to have taken time, and nothing that executed is marked `stale` or
+`overridden`.
+
+It reads two logs and executes nothing, so it says the same thing about a run
+recorded on another machine a year ago, and it exits non-zero on a failed check.
+A check it cannot run — a fork whose parent is not in this store, a killed run
+with no totals yet — comes back skipped rather than passed, and the last line
+says how much of the verification that leaves undone. In code it is
+`verifyRun(runId)`.
+
 ## Storage
 
 Runs are JSONL under `.retrace/runs/<run-id>.jsonl`, one event per line, appended synchronously. If the process dies mid-run the log is still a truthful prefix — a torn final line is dropped on read, and everything before it stands — and a truthful prefix is enough to [pick the run back up](#picking-a-run-back-up). `MemoryStore` is the same interface with nothing on disk.
@@ -466,11 +505,16 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 - **Streaming is a view of a model call, not an effect.** Fragments never reach the log; the message they assemble into does. A replayed step reconstructs its fragments from the log, one per content block, so you get the same text back but not the same cadence.
 - **Changing `input`, the prompt or the tools on a fork with `atStep > 0` does nothing for the replayed steps** — those model calls come from the log, which was produced with the old ones. That is the point of forking, and since it is easy to forget, the log now marks each such step `stale`: replayed, and recorded against a request this run no longer builds. Fork at 0 to change what the replayed steps saw.
 - **The digest behind `stale` covers the request, not the world.** Model, system prompt, tools, conversation, token and thinking settings — all of it. A tool that returns something different today because a database moved underneath it is not something a request digest can see.
+- **`verify` checks the log against the log.** It proves that a fork's free
+  prefix is the prefix its parent recorded and that the money adds up to the
+  savings claimed. It cannot tell you the recorded values were the right
+  answers, or that a tool asked the same question today would still say the same
+  thing — nothing that reads only a log can.
 - **An override is a counterfactual for the steps above it and nothing else.** Replacing a value changes what the live steps see; the replayed steps between it and the fork point still come out of the log as recorded, and are marked `stale` for it. The fork's log is a truthful record of a run that answered a question its parent never asked — it is not a record of what the parent would have done, because nothing re-ran to find out.
 
 ## Status
 
-Early, and not yet on npm. The core — journal, agent loop, fork, replay, resume, budgets, store, CLI, the clock/uuid/random effects, request digests and the `stale` marking built on them, value overrides, the HTML report, streaming, and parallel tool calls — is covered by 146 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+Early, and not yet on npm. The core — journal, agent loop, fork, replay, resume, budgets, store, CLI, the clock/uuid/random effects, request digests and the `stale` marking built on them, value overrides, the HTML report, streaming, parallel tool calls, and the `verify` audit — is covered by 161 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -478,7 +522,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 146 tests, no network, no API key
+npm test           # 161 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

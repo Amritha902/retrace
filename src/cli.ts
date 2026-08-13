@@ -16,7 +16,8 @@ import {
 } from "./replay.ts";
 import { renderReport } from "./report.ts";
 import { DEFAULT_STORE_DIR, RunStore } from "./store.ts";
-import type { ContentBlock, Provider, RetraceEvent } from "./types.ts";
+import { verifyRun } from "./verify.ts";
+import type { ContentBlock, ForkOrigin, Provider, RetraceEvent } from "./types.ts";
 
 const USAGE = `retrace — inspect and re-run recorded agent runs
 
@@ -28,6 +29,8 @@ const USAGE = `retrace — inspect and re-run recorded agent runs
   retrace fork <run-id> --at N  replay the steps below N, then run live
   retrace resume <run-id>       carry on a run that stopped early, from its log
   retrace report <run-id>       write the run as one self-contained HTML page
+  retrace verify <run-id>       check the log against its own claims, and a
+                                fork's free prefix against the run it came from
 
 Options
   --dir <path>              store directory (default: ${DEFAULT_STORE_DIR})
@@ -105,6 +108,8 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       return cmdResume(io, store, rest[0], modulePath, overrides, onDivergence);
     case "report":
       return cmdReport(io, store, rest[0], out);
+    case "verify":
+      return cmdVerify(io, store, rest[0]);
     case undefined:
     case "-h":
     case "--help":
@@ -515,6 +520,56 @@ function cmdReport(
     ),
   );
   return 0;
+}
+
+/**
+ * Reads two logs at most and executes nothing, so it says the same thing about
+ * a run wherever that run is read — which is the only way the claim is worth
+ * anything. Exits non-zero on a failed check so it can gate a pipeline.
+ */
+function cmdVerify(io: Io, store: RunStore, runId: string | undefined): number {
+  if (!runId) return fail(io, "verify needs a run id");
+
+  const summary = inspect(runId, store);
+  const report = verifyRun(runId, store);
+
+  io.out(`${bold(runId)}  ${statusLabel(summary.status)}\n`);
+  if (summary.forkedFrom) io.out(dim(`${origin(summary.forkedFrom)}\n`));
+  io.out("\n");
+
+  const width = Math.max(...report.checks.map((c) => c.name.length));
+  for (const check of report.checks) {
+    const mark =
+      check.status === "ok" ? green("ok  ") : check.status === "failed" ? red("fail") : dim("--  ");
+    const detail = check.status === "failed" ? check.detail : dim(check.detail);
+    io.out(`  ${mark} ${check.name.padEnd(width)}  ${detail}\n`);
+  }
+
+  if (!report.ok) {
+    const broken = report.checks.filter((c) => c.status === "failed").map((c) => c.name);
+    io.out(`\n${red("unverified")}: ${broken.join(", ")}\n`);
+    return 1;
+  }
+  if (report.complete) {
+    io.out(`\n${green("verified")}: this log holds up against everything it claims\n`);
+    return 0;
+  }
+  const short = report.checks.filter((c) => c.status === "skipped").length;
+  io.out(
+    `\n${yellow("verified as far as it goes")}: ` +
+      `${short} check${short === 1 ? "" : "s"} had nothing to run against\n`,
+  );
+  return 0;
+}
+
+/** Where a re-entered run came from, in the words of the command that made it. */
+function origin(from: ForkOrigin): string {
+  if (from.resumed) {
+    return `picked up from ${from.runId}, which stopped ${statusLabel(from.resumed.parentStatus)} after ${from.resumed.after} effects`;
+  }
+  return from.atStep === "all"
+    ? `replayed from ${from.runId} in full`
+    : `forked from ${from.runId} at step ${from.atStep}`;
 }
 
 /**
