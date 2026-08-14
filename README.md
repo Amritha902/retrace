@@ -667,6 +667,40 @@ That last line is the whole point of the command. Everything else here works to
 make a replayed prefix free; this is the one thing that says whether a free
 prefix is still worth having.
 
+`moved` reads as *the world changed under a stable tool*, and that is only one
+of the two things that make a tool disagree with the log. The other is a tool
+with no settled answer at all — one that reads the clock, an id or a counter
+from outside `ctx`, where [the journal cannot follow
+it](#time-ids-and-randomness). Both look identical against the log, and they
+mean opposite things: a moved corpus is worth re-recording the run for, and an
+unstable tool is a run that was never replayable in the first place. So a call
+that disagrees is asked *once more*, and the two answers are compared with each
+other rather than with the log:
+
+```
+  unstable  step:0#0:lookup  {"term":"alpha"}
+                             was  definition of alpha
+                             now  definition of alpha (read 1)
+                             now  definition of alpha (read 2)
+
+unstable: 1 of 3 re-executed tool calls did not give the same answer twice — it
+reads something the journal does not cover, so what the log holds is a snapshot
+rather than an answer a fork could replay
+```
+
+Two `now` lines, because both of them are what it says now. This is the one
+check anywhere here that can find the hazard the [determinism
+caveats](#determinism-honestly) have always had to state and never had to
+prove — a tool reaching past `ctx` for its time or its ids. The recorded reads
+resolve by key, so a tool taking those from `ctx` gets the same ones both times
+and can only differ by going somewhere the journal is not.
+
+The second execution only happens where there is already a finding to explain: a
+call that agreed with the log is asked once and no more, so re-checking a run
+that holds up costs exactly what it did before. A call that disagreed runs twice
+— which matters for the same reason the rest of this command does, and `--tool`
+is still the answer.
+
 The model is never called — the questions are already in the log, and asking it
 again would just be a second run. And what gets asked is exactly what was asked:
 a tool's own effect holds only a digest of its input, so the input itself is read
@@ -680,9 +714,9 @@ a pass. A call naming a tool the module does not export is `no tool`. A call you
 kept `--tool` away from is `skipped`. A value an
 [override](#what-if-it-had-said-something-else) substituted is `set` — no tool
 ever produced it, so a tool disagreeing with it is the tool being right. The
-report is `ok` when nothing moved and `complete` only when everything actually
-ran, and the closing line reports the difference rather than calling a run
-checked that wasn't:
+report is `ok` when nothing moved and nothing was unstable, and `complete` only
+when everything actually ran, and the closing line reports the difference rather
+than calling a run checked that wasn't:
 
 ```
 still true as far as it goes: 2 of 3 recorded tool calls re-executed and agreed;
@@ -709,7 +743,18 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 - **Tool side effects are real.** A replayed tool call returns the recorded result without executing, which is the point — but a fork that goes live past a `send_email` tool will send the email again. Gate irreversible tools yourself.
 - **A resume re-runs the tool call that was in flight when the run died.** Its result never reached the log, so as far as the log is concerned it never ran — and the log is all `resume` has. A tool that had already done its work and was killed before returning does that work twice. This is the same hazard as the bullet above, arriving at the one moment you are least likely to be thinking about it.
 - **Tools run sequentially by default**, in the order the model requested them. `parallelTools` overlaps them and still records deterministically — results are journaled in request order, and time and ids resolve by key — but the side-effect ordering isn't, which is why it is opt-in rather than on.
-- **Clock and randomness are journaled only if you take them from the tool context.** `ctx.now()`, `ctx.uuid()` and `ctx.random()` are recorded and stable; a tool that calls `Date.now()` directly still reads the real clock and may branch differently when it goes live.
+- **Clock and randomness are journaled only if you take them from the tool
+  context.** `ctx.now()`, `ctx.uuid()` and `ctx.random()` are recorded and
+  stable; a tool that calls `Date.now()` directly still reads the real clock and
+  may branch differently when it goes live. This is the one hole in the
+  guarantee that nothing in the log can close, because what the tool reached for
+  is not in the log. It is, however, findable:
+  [`recheck`](#checking-a-log-against-the-world) executes a disagreeing call a
+  second time against the same recorded reads, and a tool that cannot agree with
+  itself is reported `unstable` rather than `moved`. That does not make such a
+  tool replayable — nothing can, short of taking the value from `ctx` — but it
+  is the difference between a caveat you have to remember and one the runtime
+  will point at.
 - **Deterministic values are matched by slot, not by meaning.** A fork that reaches `step:4#0:search` gets whatever the parent recorded at `step:4#0:search`, even if the fork's step 4 is asking a different question. For a timestamp that is the point; if your tool derives something load-bearing from `ctx.random()`, know that it is keyed by position in the run.
 - **A model call that throws is recorded, and replays as a throw.** The failure
   goes in the log where the value would have gone, so a run that died on a 529
@@ -735,16 +780,18 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   leaves the store is traced to that point and reported skipped, not passed.
 - **`recheck` executes your tools, on purpose.** It is the one command here that
   reaches the world by design, so a recorded `send_email` is sent again unless
-  `--tool` keeps it out of the run. It hands each call the clock, ids and
-  randomness the log recorded at the same slots, so a tool that takes those from
-  `ctx` is compared on what it said rather than on when it was asked — but a tool
-  reading `Date.now()` directly will look like it has moved, for the same reason
-  it would replay differently.
+  `--tool` keeps it out of the run — and a call that disagrees with the log is
+  executed *twice*, since asking again is what separates a moved corpus from a
+  tool with no settled answer. A call that agreed is asked once. It hands each
+  call the clock, ids and randomness the log recorded at the same slots, so a
+  tool that takes those from `ctx` is compared on what it said rather than on
+  when it was asked; a tool reading `Date.now()` directly comes back `unstable`,
+  which is the honest name for what would happen to it on a fork.
 - **An override is a counterfactual for the steps above it and nothing else.** Replacing a value changes what the live steps see; the replayed steps between it and the fork point still come out of the log as recorded, and are marked `stale` for it — the model calls on `conversation`, and any tool call whose input the substitution moved on `input`. The fork's log is a truthful record of a run that answered a question its parent never asked — it is not a record of what the parent would have done, because nothing re-ran to find out.
 
 ## Status
 
-Early, and not yet on npm. The core — journal, agent loop, fork, replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests and the `stale` marking built on them, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit and the `recheck` re-execution — is covered by 217 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+Early, and not yet on npm. The core — journal, agent loop, fork, replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests and the `stale` marking built on them, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit and the `recheck` re-execution, including its `unstable` finding — is covered by 221 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -752,7 +799,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 217 tests, no network, no API key
+npm test           # 221 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

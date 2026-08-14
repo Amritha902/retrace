@@ -63,6 +63,7 @@ export {
   type RunSummary,
 } from "./replay.ts";
 export {
+  executed,
   recheckEvents,
   recheckRun,
   type RecheckOptions,

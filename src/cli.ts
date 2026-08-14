@@ -15,7 +15,7 @@ import {
   staleEffects,
   summarize,
 } from "./replay.ts";
-import { recheckRun, type RecheckReport, type RecheckStatus } from "./recheck.ts";
+import { executed, recheckRun, type RecheckReport, type RecheckStatus } from "./recheck.ts";
 import { renderReport } from "./report.ts";
 import { DEFAULT_STORE_DIR, RunStore } from "./store.ts";
 import { verifyRun } from "./verify.ts";
@@ -52,7 +52,9 @@ Options
                             the loop; live executes from that point instead
   --tool <name>             limit recheck to this tool. Repeatable. Everything
                             it runs, it runs for real — this is how you keep it
-                            away from a tool that writes something
+                            away from a tool that writes something. A call that
+                            disagrees with the log is run a second time, to tell
+                            a moved corpus from a tool with no settled answer
 `;
 
 const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
@@ -639,28 +641,48 @@ async function cmdRecheck(
   for (const call of report.calls) {
     const label = RECHECK_LABELS[call.status].padEnd(MARK_WIDTH);
     const mark =
-      call.status === "same" ? green(label) : call.status === "moved" ? red(label) : dim(label);
+      call.status === "same"
+        ? green(label)
+        : call.status === "moved" || call.status === "unstable"
+          ? red(label)
+          : dim(label);
     io.out(`  ${mark} ${call.key.padEnd(width)}  ${dim(truncate(JSON.stringify(call.input), 60))}\n`);
-    if (call.status === "moved" && call.now) {
-      // Under the input column: the question, then the two answers to it.
+    if (call.now && (call.status === "moved" || call.status === "unstable")) {
+      // Under the input column: the question, then the answers to it. An
+      // unstable call gets a second `now` rather than a new label, because both
+      // of them are what it says now and that they differ is the finding. A
+      // moved one was asked twice too, and agreed with itself both times —
+      // printing that agreement twice would say nothing.
       const indent = " ".repeat(width + MARK_WIDTH + 5);
-      io.out(`${indent}${dim("was")}  ${truncate(call.recorded.content, 90)}\n`);
-      io.out(`${indent}${dim("now")}  ${cyan(truncate(call.now.content, 90))}\n`);
+      const said = (label: string, value: string, paint = (s: string) => s): void =>
+        io.out(`${indent}${dim(label)}  ${paint(truncate(value, 90))}\n`);
+      said("was", call.recorded.content);
+      said("now", call.now.content, cyan);
+      if (call.status === "unstable" && call.again) said("now", call.again.content, cyan);
     }
   }
 
+  const unstable = report.calls.filter((c) => c.status === "unstable").length;
   const moved = report.calls.filter((c) => c.status === "moved").length;
-  const ran = report.calls.filter((c) => c.status === "same" || c.status === "moved").length;
+  const ran = report.calls.filter(executed).length;
   io.out("\n");
 
+  if (unstable > 0) {
+    io.out(
+      `${red("unstable")}: ${unstable} of ${ran} re-executed tool call${ran === 1 ? "" : "s"} ` +
+        `did not give the same answer twice — ${unstable === 1 ? "it reads" : "they read"} ` +
+        `something the journal does not cover, so what the log holds is a snapshot rather than ` +
+        `an answer a fork could replay\n`,
+    );
+  }
   if (moved > 0) {
     io.out(
       `${red("moved")}: ${moved} of ${ran} re-executed tool call${ran === 1 ? "" : "s"} no longer ` +
         `return${moved === 1 ? "s" : ""} what the log holds — a fork off this run replays an ` +
         `answer the world has since changed\n`,
     );
-    return 1;
   }
+  if (unstable > 0 || moved > 0) return 1;
   if (report.complete) {
     io.out(
       `${green("still true")}: all ${ran} recorded tool call${ran === 1 ? "" : "s"} ` +
@@ -683,6 +705,7 @@ async function cmdRecheck(
 const RECHECK_LABELS: Record<RecheckStatus, string> = {
   same: "same",
   moved: "moved",
+  unstable: "unstable",
   substituted: "set",
   missing: "no tool",
   skipped: "skipped",

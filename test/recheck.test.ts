@@ -26,6 +26,7 @@ import {
 
 const FIXTURE = fileURLToPath(new URL("./fixtures/agent-module.ts", import.meta.url));
 const MOVED = fileURLToPath(new URL("./fixtures/moved-module.ts", import.meta.url));
+const UNSTABLE = fileURLToPath(new URL("./fixtures/unstable-module.ts", import.meta.url));
 
 const agent = defineAgent({ name: "researcher", model: "claude-opus-5", maxSteps: 6 });
 
@@ -168,6 +169,99 @@ test("a tool that fails today where it answered before has moved too", async (t)
   assert.equal(moved.now?.isError, true);
   assert.equal(moved.now?.content, "the corpus is offline");
   assert.equal(moved.recorded.isError, false);
+});
+
+test("a tool that cannot agree with itself is unstable, not moved", async (t) => {
+  const store = fresh(t);
+  await record(store);
+
+  // Reads a counter rather than the clock for the same reason the loop keys
+  // deterministic reads by slot: two clock reads in the same millisecond are
+  // equal, and this has to differ with certainty.
+  let reads = 0;
+  const drifting = tool({
+    name: "lookup",
+    description: "Look a term up. Call this when you need a fact you don't have.",
+    inputSchema: objectSchema({ term: { type: "string" } }),
+    run: (input: { term: string }) => `definition of ${input.term} (read ${++reads})`,
+  });
+
+  const report = await recheckRun("baseline", { tools: [drifting], store });
+
+  assert.equal(report.ok, false);
+  // It ran and was compared, so the run is checked — it is the tool that has no
+  // answer to check against.
+  assert.equal(report.complete, true);
+  const call = named(report, "step:0#0:lookup");
+  assert.equal(call.status, "unstable");
+  assert.notEqual(call.again?.content, call.now?.content);
+  assert.equal(call.recorded.content, "definition of alpha");
+});
+
+test("a stable tool is asked once; only a disagreeing one is asked again", async (t) => {
+  const store = fresh(t);
+  await record(store);
+
+  let executions = 0;
+  const counted = tool({
+    name: "lookup",
+    description: "Look a term up. Call this when you need a fact you don't have.",
+    inputSchema: objectSchema({ term: { type: "string" } }),
+    run: (input: { term: string }) => {
+      executions++;
+      return definition(input.term);
+    },
+  });
+
+  const agreed = await recheckRun("baseline", { tools: [counted], store });
+  assert.deepEqual(
+    agreed.calls.map((c) => c.status),
+    ["same", "same"],
+  );
+  // The second execution is what separates a moved corpus from an unstable
+  // tool, and a call that agreed has nothing to separate. Two calls, two runs:
+  // re-checking a run that holds up costs exactly what it used to.
+  assert.equal(executions, 2);
+  assert.equal(agreed.calls.every((c) => c.again === undefined), true);
+
+  executions = 0;
+  definition = (term) => `revised definition of ${term}`;
+  const moved = await recheckRun("baseline", { tools: [counted], store });
+  assert.deepEqual(
+    moved.calls.map((c) => c.status),
+    ["moved", "moved"],
+  );
+  assert.equal(executions, 4);
+});
+
+test("a tool taking its time from the journal is stable, however often it is asked", async (t) => {
+  const store = fresh(t);
+  const stamp = tool({
+    name: "stamp",
+    description: "Stamp the note with the time. Call this to file something.",
+    inputSchema: objectSchema({ note: { type: "string" } }),
+    run: async (input: { note: string }, ctx: ToolContext) =>
+      `${input.note} filed at ${await ctx.now()}, ref ${await ctx.uuid()}`,
+  });
+
+  await run("file it", {
+    agent,
+    provider: new MockProvider([
+      { content: [toolUse("t1", "stamp", { note: "alpha" })] },
+      { content: [text("filed")] },
+    ]),
+    tools: [stamp],
+    store,
+    runId: "stamped",
+  });
+
+  const report = await recheckRun("stamped", { tools: [stamp], store });
+
+  // The same tool written against `Date.now()` is the unstable case above. This
+  // is what the journal buys: taking the two reads from `ctx` is the difference
+  // between a tool with a recorded answer and one with none.
+  assert.equal(named(report, "step:0#0:stamp").status, "same");
+  assert.equal(report.ok, true);
 });
 
 test("a call naming a tool the module does not export is missing, not failed", async (t) => {
@@ -331,11 +425,16 @@ test("a journal slot the log never filled reads the world instead of failing", a
   const report = await recheckRun("stamped", { tools: [stamp], store });
 
   const call = named(report, "step:0#0:stamp");
-  assert.equal(call.status, "moved");
+  // Unstable rather than moved, and the distinction is the whole finding: the
+  // world did not change, the tool grew a read the log does not cover. Nothing
+  // it says at this slot is reproducible, so re-recording the run would not fix
+  // it — which is the opposite of what "moved" would have you do.
+  assert.equal(call.status, "unstable");
   assert.ok(
     call.now?.content.startsWith(`${call.recorded.content} `),
     `expected the recorded id first, got "${call.now?.content}"`,
   );
+  assert.notEqual(call.again?.content, call.now?.content);
 });
 
 test("a call the log asks for but never records is not something to compare", async (t) => {
@@ -440,6 +539,24 @@ test("the CLI exits non-zero and prints both answers when a tool has moved", asy
   assert.match(io.text(), /was {2}definition of alpha/);
   assert.match(io.text(), /now {2}revised definition of alpha/);
   assert.match(io.text(), /2 of 2 re-executed tool calls no longer return what the log holds/);
+});
+
+test("the CLI names an unstable tool as such, and prints both of today's answers", async (t) => {
+  const dir = tempDir(t);
+  await recordOnDisk(dir);
+  const io = capture();
+
+  const code = await main(["recheck", "baseline", "--dir", dir, "--module", UNSTABLE], io);
+
+  assert.equal(code, 1);
+  assert.match(io.text(), /unstable\s+step:0#0:lookup/);
+  // Two `now` lines under one `was`: both are what it says now, and that they
+  // differ is the finding.
+  assert.match(io.text(), /was {2}definition of alpha\n/);
+  assert.match(io.text(), /now {2}definition of alpha \(read 1\)\n/);
+  assert.match(io.text(), /now {2}definition of alpha \(read 2\)\n/);
+  assert.match(io.text(), /2 of 2 re-executed tool calls did not give the same answer twice/);
+  assert.doesNotMatch(io.text(), /the world has since changed/);
 });
 
 test("--tool keeps recheck away from the tools it should not run twice", async (t) => {

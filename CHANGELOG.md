@@ -117,7 +117,20 @@ publish contains rather than what changed since something.
   `ctx` is compared on what it said rather than on when. A call naming a tool the
   module no longer exports, one narrowed out by `only`, and one holding a value
   an override substituted are each counted apart rather than folded into a pass —
-  the report is `ok` when nothing moved and `complete` only when everything ran.
+  the report is `ok` when nothing moved and nothing was unstable, and `complete`
+  only when everything ran.
+- **`unstable`, the finding that separates a moved corpus from a tool that never
+  had an answer.** A tool disagreeing with the log reads as the world having
+  moved underneath it, and that is only half the cases: the other is a tool
+  taking its time, ids or randomness from outside `ctx`, where the journal
+  cannot follow it. The two look identical against the log and mean opposite
+  things — one is worth re-recording the run for, the other was never replayable
+  at all. So a call that disagrees is executed once more against the same
+  recorded reads and the two answers compared with each other: agreeing twice is
+  `moved`, and failing to is `unstable`. This is the only check anywhere here
+  that can find the one determinism caveat the log itself cannot see. A call
+  that agreed is executed once and no more, so re-checking a run that holds up
+  costs what it always did.
 - **A substituted value is marked on the run that was told to substitute it,**
   and not on its descendants. A fork of a counterfactual inherits the value like
   any other recorded value; the `overridden` mark stays in the log where the
@@ -136,8 +149,8 @@ provider, and any agent overrides.
 network, readable in a light or a dark browser. `verify` prints one line per
 check and exits non-zero on a failure, so it can gate a pipeline. `recheck
 --module <path>` does the same for the tools, printing both answers where one
-has moved; `--tool <name>` is repeatable and keeps it away from the tools that
-should not run twice.
+has moved and today's two answers where one is `unstable`; `--tool <name>` is
+repeatable and keeps it away from the tools that should not run twice.
 
 ### Storage and providers
 

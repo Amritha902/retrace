@@ -13,8 +13,10 @@ export interface ToolOutcome {
 export type RecheckStatus =
   /** The tool was asked the recorded question and gave the recorded answer. */
   | "same"
-  /** It was asked the recorded question and said something else. */
+  /** It was asked the recorded question and twice said the same something else. */
   | "moved"
+  /** It did not say the same thing twice, so it never had an answer to hold it to. */
+  | "unstable"
   /** The recorded value was substituted by hand, so no tool ever produced it. */
   | "substituted"
   /** The module exports no tool by that name. */
@@ -34,13 +36,31 @@ export interface RecheckedCall {
   recorded: ToolOutcome;
   /** What the tool said just now. Absent unless it executed. */
   now?: ToolOutcome;
-  /** Milliseconds this execution took. Zero when nothing ran. */
+  /**
+   * What it said when asked a second time. Present only on a call that
+   * disagreed with the log the first time, which is the only case a second
+   * execution can settle anything — see `recheckOne`.
+   */
+  again?: ToolOutcome;
+  /**
+   * Milliseconds spent executing this call — both times, where it was asked
+   * twice. Zero when nothing ran.
+   */
   durationMs: number;
+}
+
+/**
+ * Whether this call actually ran, and so counts towards what was compared.
+ * Every surface that reports a proportion counts with this, rather than
+ * re-listing the statuses and coming to disagree with `complete`.
+ */
+export function executed(call: RecheckedCall): boolean {
+  return call.status === "same" || call.status === "moved" || call.status === "unstable";
 }
 
 export interface RecheckReport {
   runId: string;
-  /** False when a tool no longer returns what the log holds. */
+  /** False when a tool no longer returns what the log holds, or never settled on one. */
   ok: boolean;
   /** True when every recorded call was executed and compared. */
   complete: boolean;
@@ -73,9 +93,13 @@ export interface RecheckOptions {
  * is never called: the questions are already in the log, and re-deriving them
  * would just be a second run.
  *
+ * A call that disagrees is then asked once more, which is the difference between
+ * "the world moved" and "this tool never had an answer to record" — see
+ * `recheckOne`. A call that agreed is asked once and no more.
+ *
  * It executes real tools, which is the same hazard as forking past a
- * `send_email` — the recorded call runs again, for real. `only` is how you keep
- * it to the ones that just read.
+ * `send_email` — the recorded call runs again, for real, and a disagreeing one
+ * runs twice. `only` is how you keep it to the ones that just read.
  */
 export async function recheckRun(
   runId: string,
@@ -105,8 +129,8 @@ export async function recheckEvents(
 
   return {
     runId,
-    ok: !calls.some((c) => c.status === "moved"),
-    complete: calls.every((c) => c.status === "same" || c.status === "moved"),
+    ok: !calls.some((c) => c.status === "moved" || c.status === "unstable"),
+    complete: calls.every(executed),
     calls,
   };
 }
@@ -128,12 +152,32 @@ async function recheckOne(
 
   const startedAt = Date.now();
   const now = await invoke(tools, call, recordedContext(journal, step, key));
+  if (agree(now, value)) return { ...base, status: "same", now, durationMs: Date.now() - startedAt };
+
+  // It disagreed, and the obvious reading — a stable tool whose corpus moved
+  // underneath the log — is only one of the two things that produce this. The
+  // other is a tool with no settled answer at all: one that reads the clock or
+  // an id from outside `ctx`, where the journal cannot follow it. Both look
+  // identical against the log, and they mean opposite things. A replayed
+  // prefix off a moved tool is stale; off an unstable one it was never an
+  // answer, and re-recording the run would not fix it.
+  //
+  // Asking a second time is what separates them, because the recorded reads
+  // resolve by key: a tool taking its timestamps from `ctx` gets the same ones
+  // both times and can only differ if it went somewhere the journal is not.
+  const again = await invoke(tools, call, recordedContext(journal, step, key));
   return {
     ...base,
-    status: now.content === value.content && now.isError === value.isError ? "same" : "moved",
+    status: agree(again, now) ? "moved" : "unstable",
     now,
+    again,
     durationMs: Date.now() - startedAt,
   };
+}
+
+/** Two answers are the same answer when the model could not tell them apart. */
+function agree(a: ToolOutcome, b: ToolOutcome): boolean {
+  return a.content === b.content && a.isError === b.isError;
 }
 
 /** A recorded call, paired with the question the model put to it. */
