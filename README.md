@@ -564,7 +564,7 @@ Every charge is tracked twice: `costUsd` is what the tokens are worth at list pr
 retrace ls                    # every run, with cost and what replay saved
 retrace show <run-id>         # the timeline, marking each effect live or replayed
 retrace cost <run-id>         # per-step spend
-retrace diff <run-a> <run-b>  # where two runs stopped agreeing
+retrace diff <run-a> <run-b>  # where two runs stopped agreeing, and where they can't
 retrace replay <run-id>       # re-run it from the log and check it reproduces
 retrace fork <run-id> --at N  # replay the steps below N, then run live
 retrace fork … --at <key>     # …or re-enter mid-step, at one recorded call
@@ -578,7 +578,9 @@ retrace export <run-id>       # the run and everything it was forked from, as on
 retrace import <path>         # …read back into a store, so verify runs whole there
 ```
 
-`diff` is the one to reach for after a fork — it shows exactly which effect the two runs stopped sharing.
+`diff` is the one to reach for after a fork — it shows exactly which effect the
+two runs stopped sharing, and holds them to the prefix they didn't. See
+[checking two logs against each other](#checking-two-logs-against-each-other).
 
 ### Re-running from the command line
 
@@ -783,6 +785,74 @@ here would
 In code it is `collectBundle(runId, store)`, `serializeBundle`, `parseBundle` and
 `importBundle(bundle, store)`.
 
+### Checking two logs against each other
+
+`diff` is the command to reach for after a fork. It lines the two runs up effect
+by effect and shows where they stopped agreeing:
+
+```
+$ retrace diff demo-original demo-forked
+
+demo-original  completed  ·  demo-forked  completed
+demo-forked forked from demo-original at step 3
+
+    0–5 = 6 shared
+      6 ≠ model:step:3 — same call, different result
+
+free      6 effects demo-forked replayed from demo-original, value for value
+diverges  at effect 6, the first effect either run ran for itself
+ended     both completed, with different answers
+billed    $0.9200 → $0.2300
+```
+
+The bottom half is the part that is a check rather than a description. Where the
+two part ways is a fact about your change and nothing to complain about —
+diverging is what a fork is *for*. What is not free to differ is everything
+*below* that: a fork bills nothing for its prefix because the prefix came out of
+the run it was forked from, and two runs cannot have taken different values out
+of the same log. `free` is how many effects that covers, and whether they hold.
+
+Which makes it the answer to the one thing
+[`verify`](#checking-a-log-against-itself) gives up on. A fork read on a machine
+that has never seen its parent is a free prefix with nothing to check against,
+and `verify` says so and exits zero:
+
+```
+  --   parent   the run it came from ("demo-original") is not in this store, so its prefix is unchecked
+  --   lineage  nothing this run got free can be traced to the run that ran it: the trail stops where "demo-original" is not in this store
+```
+
+Two forks of that run check *each other* instead. They replayed the same prefix
+out of the same log, so they have to agree on it, and establishing that needs
+only the two logs in front of you:
+
+```
+$ retrace diff demo-forked demo-counterfactual
+
+free      6 effects both replayed from demo-original: 5 value for value, 1 substituted on purpose
+```
+
+Five, not six, because one of them is a
+[counterfactual](#what-if-it-had-said-something-else): an override serves a
+value the parent never recorded, so that is the one position the two are meant
+to disagree at. Every other effect between it and the fork point still came out
+of the log unchanged, which is why the substitution excuses a position rather
+than ending the claim. Doctor one of those and it has nowhere to hide:
+
+```
+contradicted: effect 3 (tool:step:1#0:search) differs, and demo-forked and
+demo-counterfactual both replayed it from demo-original — two runs cannot have
+taken different values out of the same log
+```
+
+That is the whole of what it exits non-zero on. Two runs with no relation
+between them owe each other nothing, and it says so rather than inventing a
+claim to fail; so does a fork at step 0, which replayed nothing. Only the direct
+relations count — one run forked, resumed or replayed from the other, or both
+from the same run — because a log names the run it came from and nothing
+further. Cousins need the logs in between, and that is `verify`'s lineage walk.
+In code it is `compareRuns(a, b)`.
+
 ### Checking a log against the world
 
 `verify` executes nothing, which is what makes it portable and also what bounds
@@ -942,6 +1012,17 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   leaves the store is traced to that point and reported skipped, not passed —
   which is a fact about the store rather than about the run, and
   [`export`](#taking-a-lineage-with-you) is how you hand it the rest.
+- **`diff` checks two logs against each other, one hop at a time.** Two runs
+  that both replayed a stretch of the same log cannot hold different values
+  across it, and that is checkable from the two logs alone — which is what makes
+  it the check that still works when the run they came from is gone, where
+  `verify` reports its lineage skipped. It only claims the relations a log
+  names directly: one run forked, resumed or replayed from the other, or both
+  from the same run. Two runs further apart than that are compared and held to
+  nothing, because the logs in between are where the connection lives, and
+  `verify` is what walks them. Everything above the shared prefix is a
+  description and not a verdict — a fork that diverges from its parent at the
+  fork point is a fork working.
 - **`recheck` executes your tools, on purpose.** It is the one command here that
   reaches the world by design, so a recorded `send_email` is sent again unless
   `--tool` keeps it out of the run — and a call that disagrees with the log is
@@ -956,7 +1037,7 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 ## Status
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
-one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit and the `recheck` re-execution including its `unstable` finding, and the lineage bundles `export` and `import` move between stores — is covered by 264 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit, the `diff` comparison that holds two logs to the prefix they claim from the same source, and the `recheck` re-execution including its `unstable` finding, and the lineage bundles `export` and `import` move between stores — is covered by 277 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -964,7 +1045,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 264 tests, no network, no API key
+npm test           # 277 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

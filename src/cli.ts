@@ -3,6 +3,7 @@ import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { orderFacets } from "./agent.ts";
 import { collectBundle, importBundle, parseBundle, serializeBundle } from "./bundle.ts";
+import { compareRuns, type EffectPair, type RunComparison } from "./compare.ts";
 import { explainStale } from "./explain.ts";
 import { loadRunModule, type RunModule } from "./module.ts";
 import { formatUsd } from "./pricing.ts";
@@ -29,7 +30,8 @@ const USAGE = `retrace — inspect and re-run recorded agent runs
   retrace ls                    list runs, newest last
   retrace show <run-id>         print the run's timeline
   retrace cost <run-id>         per-step spend, and what replay saved
-  retrace diff <run-a> <run-b>  compare two runs step by step
+  retrace diff <run-a> <run-b>  where two runs stopped agreeing, and whether
+                                they agree everywhere they had to
   retrace replay <run-id>       re-run it from the log, and check it reproduces
   retrace fork <run-id> --at N  replay the steps below N, then run live
                                 (--at <effect-key> re-enters mid-step instead)
@@ -275,37 +277,128 @@ function cmdCost(io: Io, store: RunStore, runId: string | undefined): number {
 
 function cmdDiff(io: Io, store: RunStore, a: string | undefined, b: string | undefined): number {
   if (!a || !b) return fail(io, "diff needs two run ids");
-  const left = effectsOf(store.read(a));
-  const right = effectsOf(store.read(b));
+  const cmp = compareRuns(a, b, store);
 
-  io.out(`${bold(a)} ${dim("vs")} ${bold(b)}\n\n`);
-  const n = Math.max(left.length, right.length);
+  io.out(`${bold(a)}  ${statusLabel(cmp.a.status)}  ${dim("·")}  ${bold(b)}  ${statusLabel(cmp.b.status)}\n`);
+  for (const summary of [cmp.a, cmp.b]) {
+    if (summary.forkedFrom) io.out(dim(`${summary.runId} ${origin(summary.forkedFrom)}\n`));
+  }
+  io.out("\n");
 
-  for (let i = 0; i < n; i++) {
-    const l = left[i];
-    const r = right[i];
-    const lk = l ? `${l.kind}:${l.key}` : dim("(none)");
-    const rk = r ? `${r.kind}:${r.key}` : dim("(none)");
-    const sameKey = l && r && l.kind === r.kind && l.key === r.key;
-
-    if (sameEffect(l, r)) {
-      io.out(`${String(i).padStart(3)} ${green("=")} ${lk}\n`);
+  // A run of shared effects is one fact however long it is, and printing a line
+  // each buries the two or three that differ — which are the whole reason to
+  // run this.
+  for (const group of groupPairs(cmp.pairs)) {
+    if (group.verdict === "same") {
+      io.out(`${dim(span(group.from, group.to).padStart(7))} ${green("=")} ${dim(`${group.pairs.length} shared`)}\n`);
       continue;
     }
+    for (const pair of group.pairs) {
+      const left = pair.a ? `${pair.a.kind}:${pair.a.key}` : dim("(none)");
+      io.out(
+        `${String(pair.index).padStart(7)} ${red("≠")} ` +
+          (pair.verdict === "value"
+            ? `${left} ${dim("— same call, different result")}\n`
+            : `${left} ${dim("|")} ${pair.b ? `${pair.b.kind}:${pair.b.key}` : dim("(none)")}\n`),
+      );
+    }
+  }
+
+  io.out(`\n${dim("free")}      ${freeLine(cmp)}\n`);
+  io.out(
+    `${dim("diverges")}  ` +
+      (cmp.divergedAt === -1
+        ? `nowhere: both logs hold the same ${cmp.pairs.length} effects\n`
+        : `${yellow(`at effect ${cmp.divergedAt}`)}${divergenceNote(cmp)}\n`),
+  );
+  io.out(`${dim("ended")}     ${endedLine(cmp)}\n`);
+  if (cmp.a.totals && cmp.b.totals) {
     io.out(
-      sameKey
-        ? `${String(i).padStart(3)} ${red("≠")} ${lk} ${dim("— same call, different result")}\n`
-        : `${String(i).padStart(3)} ${red("≠")} ${lk} ${dim("|")} ${rk}\n`,
+      `${dim("billed")}    ${formatUsd(cmp.a.totals.billedUsd)} ${dim("→")} ${formatUsd(cmp.b.totals.billedUsd)}\n`,
     );
   }
 
-  const divergedAt = firstDivergence(left, right);
-  io.out(
-    divergedAt === -1
-      ? `\n${green("identical")}: both runs produced the same ${n} effects\n`
-      : `\n${yellow(`diverges at effect ${divergedAt}`)}; ${divergedAt} effects shared\n`,
-  );
+  if (cmp.contradiction !== undefined) {
+    io.out(`\n${red("contradicted")}: ${cmp.contradiction}\n`);
+    return 1;
+  }
   return 0;
+}
+
+/** What the two logs owe each other, and whether they paid it. */
+function freeLine(cmp: RunComparison): string {
+  if (cmp.claimed === 0) {
+    return dim(
+      cmp.kinship.kind === "unrelated"
+        ? "neither log names the other, or a run they both came from — nothing here has to match"
+        : "neither run took anything out of a log, so both of them ran every effect they hold",
+    );
+  }
+  const owed =
+    cmp.kinship.kind === "siblings"
+      ? `both replayed from ${cmp.kinship.origin}`
+      : cmp.kinship.kind === "parent"
+        ? `${cmp.kinship.parent === "a" ? cmp.b.runId : cmp.a.runId} replayed from ${cmp.kinship.parent === "a" ? cmp.a.runId : cmp.b.runId}`
+        : "read twice";
+  const held = `${plural(cmp.claimed, "effect")} ${owed}`;
+  if (!cmp.ok) return red(held);
+  return cmp.excused === 0
+    ? `${green(held)}${dim(", value for value")}`
+    : `${green(held)}${dim(`: ${cmp.claimed - cmp.excused} value for value, ${cmp.excused} substituted on purpose`)}`;
+}
+
+/**
+ * Where the divergence sits relative to what the two runs were free to change.
+ * Landing on the fork point is the fork doing exactly what it was told; landing
+ * past it is live steps that reproduced the parent for a while first.
+ */
+function divergenceNote(cmp: RunComparison): string {
+  if (cmp.claimed === 0) return "";
+  if (cmp.divergedAt === cmp.claimed) return dim(", the first effect either run ran for itself");
+  if (cmp.divergedAt > cmp.claimed) {
+    return dim(`, ${plural(cmp.divergedAt - cmp.claimed, "effect")} past the last one replayed`);
+  }
+  const pair = cmp.pairs[cmp.divergedAt];
+  return dim(
+    pair?.a?.overridden === true || pair?.b?.overridden === true
+      ? ", a value one of them was told to serve in place of the recorded one"
+      : ", inside the prefix they share",
+  );
+}
+
+function endedLine(cmp: RunComparison): string {
+  const status =
+    cmp.a.status === cmp.b.status
+      ? `both ${statusLabel(cmp.a.status)}`
+      : `${statusLabel(cmp.a.status)} ${dim("→")} ${statusLabel(cmp.b.status)}`;
+  if (cmp.a.status !== "completed" || cmp.b.status !== "completed") return status;
+  return `${status}${dim(cmp.a.output === cmp.b.output ? ", with the same answer" : ", with different answers")}`;
+}
+
+interface PairGroup {
+  verdict: EffectPair["verdict"];
+  from: number;
+  to: number;
+  pairs: EffectPair[];
+}
+
+/** Consecutive pairs that agree, collapsed; everything else one to a line. */
+function groupPairs(pairs: readonly EffectPair[]): PairGroup[] {
+  const groups: PairGroup[] = [];
+  for (const pair of pairs) {
+    const last = groups.at(-1);
+    if (last?.verdict === "same" && pair.verdict === "same") {
+      last.to = pair.index;
+      last.pairs.push(pair);
+      continue;
+    }
+    groups.push({ verdict: pair.verdict, from: pair.index, to: pair.index, pairs: [pair] });
+  }
+  return groups;
+}
+
+function span(from: number, to: number): string {
+  return from === to ? String(from) : `${from}–${to}`;
 }
 
 async function cmdReplay(

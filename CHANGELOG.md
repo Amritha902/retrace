@@ -130,6 +130,22 @@ publish contains rather than what changed since something.
   and a run that is its own ancestor all fail there and nowhere else. A check
   with nothing to run against comes back skipped rather than passed, and a
   lineage that leaves the store is traced as far as it goes.
+- **`compareRuns(a, b)`.** Two runs lined up effect by effect, and held to the
+  stretch of them they are not free to disagree on. A run's leading replayed
+  effects came out of another log at that log's own indices, so two runs that
+  replayed the same stretch of the same log must hold the same values across it —
+  and checking that needs only the two logs. That is the case `verify` gives up
+  on: a fork whose parent is not in the store has a free prefix with nothing to
+  check it against, and reports `parent` and `lineage` skipped. Two forks of that
+  run check each other instead, and a value doctored in one of them fails.
+  Divergence above the shared prefix is a description, not a verdict — it is what
+  forking is — so only a contradiction inside the prefix exits non-zero. Only the
+  relations a log names directly are claimed: one run forked, resumed or replayed
+  from the other, or both from the same run. Runs further apart than that are
+  compared and held to nothing, since the logs in between are where the
+  connection lives and `lineage` is what walks them. An override excuses the
+  position it substituted and not the ones after it, which still came out of the
+  log unchanged.
 - **`recheckRun(runId, { tools })`.** The other half of `verify`, and the only
   thing here that reaches the world on purpose: it puts each recorded tool call
   back to the tool as it is today — with the input the model supplied at the
@@ -184,6 +200,8 @@ provider, and any agent overrides.
 `--set <effect-key>=<value>`, on `fork` and `replay`, is the counterfactual.
 `stale <run-id>` reads the run against the one it replayed from and prints both
 sides of everything that moved under its free prefix.
+`diff <run-a> <run-b>` collapses the effects the two share, names the ones they
+don't, and exits non-zero only when they disagree somewhere neither of them ran.
 `report` writes the run as one self-contained HTML page: no JavaScript, no
 network, readable in a light or a dark browser. `verify` prints one line per
 check and exits non-zero on a failure, so it can gate a pipeline. `recheck
@@ -207,7 +225,7 @@ depend on.
 
 ### Verified by
 
-264 tests that run with no network and no API key, plus two `[live]` integration
+277 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:

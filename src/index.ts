@@ -24,6 +24,13 @@ export {
   type ImportReport,
 } from "./bundle.ts";
 export {
+  compareEvents,
+  compareRuns,
+  type EffectPair,
+  type Kinship,
+  type RunComparison,
+} from "./compare.ts";
+export {
   BudgetExceededError,
   DivergenceError,
   ReplayedFailure,

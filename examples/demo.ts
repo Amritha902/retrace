@@ -9,6 +9,7 @@
  * Swap `MockProvider` for `AnthropicProvider` and nothing else changes.
  */
 import {
+  compareRuns,
   defineAgent,
   explainStale,
   fork,
@@ -147,7 +148,14 @@ console.log("5. and none of the above is taken on trust\n");
 for (const check of verifyRun("demo-forked", store).checks) {
   console.log(`   ${check.status.padEnd(6)} ${check.name.padEnd(12)} ${check.detail}`);
 }
-console.log();
+// That check needs the original in the store. The two forks above need only
+// each other: they replayed the same prefix out of the same log, so they cannot
+// hold different values across it wherever demo-original happens to be.
+const siblings = compareRuns("demo-forked", "demo-counterfactual", store);
+console.log(
+  `\n   and without demo-original at all: ${siblings.claimed} effects both forks replayed ` +
+    `from it agree, ${siblings.excused} of them substituted on purpose\n`,
+);
 
 console.log("6. …and the answers it replayed for free are still the answers\n");
 // Step 5 held the log to the log. This holds it to the world: the three
