@@ -141,6 +141,19 @@ publish contains rather than what changed since something.
   that can find the one determinism caveat the log itself cannot see. A call
   that agreed is executed once and no more, so re-checking a run that holds up
   costs what it always did.
+- **`collectBundle(runId, store)` and `importBundle(bundle, store)`.** A run and
+  every run it was forked from, as one file, because `lineage` is the check that
+  stops working when a run travels: a fork read where its parent has never been
+  is a log claiming a free prefix with nothing to check the claim against, and
+  the honest report is `skipped`. A bundle is that chain collected where it
+  exists — the same JSONL, one event to a line under a header naming what the
+  file carries — so the `verify` on the far side is the same check as the one at
+  home rather than a check of the bundle. Events are neither recomputed nor
+  renumbered in transit. A run the receiving store already holds is left alone if
+  the bundle agrees with it event for event, and refused if it does not, since a
+  bundle that could overwrite a log would be a way to doctor the history `verify`
+  reads. A chain that leaves the exporting store is bundled as far as it goes and
+  says where it stopped, rather than passing a partial lineage off as a whole one.
 - **A substituted value is marked on the run that was told to substitute it,**
   and not on its descendants. A fork of a counterfactual inherits the value like
   any other recorded value; the `overridden` mark stays in the log where the
@@ -149,7 +162,7 @@ publish contains rather than what changed since something.
 ### The CLI
 
 `retrace ls`, `show`, `cost`, `diff`, `replay`, `fork`, `resume`, `report`,
-`verify` and `recheck`.
+`verify`, `recheck`, `export` and `import`.
 `replay` needs nothing but the log and exits non-zero if the run failed to
 reproduce, so it works as a regression check on the loop. `fork --module <path>`
 and `resume --module <path>` supply the half a log cannot hold — the tools, the
@@ -161,6 +174,9 @@ check and exits non-zero on a failure, so it can gate a pipeline. `recheck
 --module <path>` does the same for the tools, printing both answers where one
 has moved and today's two answers where one is `unstable`; `--tool <name>` is
 repeatable and keeps it away from the tools that should not run twice.
+`export <run-id> -o <path>` writes the run and its whole lineage as one file —
+`-` for stdout — and `import <path>` reads one into the store `--dir` names, so
+`verify` runs complete on a machine that has only ever seen the fork.
 
 ### Storage and providers
 
@@ -175,7 +191,7 @@ depend on.
 
 ### Verified by
 
-202 tests that run with no network and no API key, plus two `[live]` integration
+249 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:

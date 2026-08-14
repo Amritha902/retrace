@@ -15,6 +15,15 @@ export {
 } from "./agent.ts";
 export { Budget } from "./budget.ts";
 export {
+  collectBundle,
+  importBundle,
+  parseBundle,
+  serializeBundle,
+  type Bundle,
+  type BundledRun,
+  type ImportReport,
+} from "./bundle.ts";
+export {
   BudgetExceededError,
   DivergenceError,
   ReplayedFailure,

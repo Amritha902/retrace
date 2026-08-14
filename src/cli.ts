@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { realpathSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { orderFacets } from "./agent.ts";
+import { collectBundle, importBundle, parseBundle, serializeBundle } from "./bundle.ts";
 import { loadRunModule, type RunModule } from "./module.ts";
 import { formatUsd } from "./pricing.ts";
 import type { Overrides } from "./journal.ts";
@@ -37,6 +38,9 @@ const USAGE = `retrace — inspect and re-run recorded agent runs
                                 got free against the runs that executed and paid
   retrace recheck <run-id>      ask the tools whether the log's answers still
                                 hold — re-executes every recorded tool call
+  retrace export <run-id>       write the run and everything it was forked from
+                                as one file, so verify runs whole elsewhere
+  retrace import <path>         read such a file into this store
 
 Options
   --dir <path>              store directory (default: ${DEFAULT_STORE_DIR})
@@ -44,8 +48,9 @@ Options
                             number, or an effect key as show prints it, which
                             replays the rest of that step and goes live at the
                             call itself — "step:2#1:search"
-  -o, --out <path>          where report writes its HTML; "-" for stdout
-                            (default: <run-id>.html)
+  -o, --out <path>          where report writes its HTML or export its bundle;
+                            "-" for stdout (default: <run-id>.html, and
+                            <run-id>.bundle.jsonl)
   --module <path>           module exporting the live half of the run — tools,
                             a provider, and agent fields to override. Required
                             by fork and resume; replay only needs it to go past
@@ -127,6 +132,10 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       return cmdVerify(io, store, rest[0]);
     case "recheck":
       return cmdRecheck(io, store, rest[0], modulePath, only);
+    case "export":
+      return cmdExport(io, store, rest[0], out);
+    case "import":
+      return cmdImport(io, store, rest[0]);
     case undefined:
     case "-h":
     case "--help":
@@ -612,6 +621,86 @@ function cmdVerify(io: Io, store: RunStore, runId: string | undefined): number {
 }
 
 /**
+ * What `verify` needs and a single log cannot carry: the runs a fork's free
+ * prefix is owed to. Collected here where they exist, so the lineage check runs
+ * whole on a machine that has never seen them.
+ */
+function cmdExport(
+  io: Io,
+  store: RunStore,
+  runId: string | undefined,
+  out: string | undefined,
+): number {
+  if (!runId) return fail(io, "export needs a run id");
+
+  const bundle = collectBundle(runId, store);
+  const text = serializeBundle(bundle);
+  if (out === "-") {
+    io.out(text);
+    return 0;
+  }
+
+  const path = out ?? `${runId}.bundle.jsonl`;
+  writeFileSync(path, text, "utf8");
+
+  const events = bundle.runs.reduce((n, r) => n + r.events.length, 0);
+  const ancestors = bundle.runs.length - 1;
+  io.out(`${bold(runId)} ${dim("→")} ${path}\n`);
+  io.out(
+    dim(
+      `${plural(bundle.runs.length, "run")}, ${plural(events, "event")}, ` +
+        `${(text.length / 1024).toFixed(0)}KB\n`,
+    ),
+  );
+
+  if (!bundle.complete) {
+    io.out(
+      yellow(
+        `the chain stops short: ${bundle.incomplete} — a verify of this bundle traces its ` +
+          `lineage that far and reports the rest skipped, exactly as one here would\n`,
+      ),
+    );
+    return 0;
+  }
+  io.out(
+    green(
+      ancestors === 0
+        ? "this run was forked from nothing, so the bundle is the whole of its lineage\n"
+        : `${plural(ancestors, "run")} of lineage, back to a run forked from nothing — ` +
+            `verify runs complete wherever this lands\n`,
+    ),
+  );
+  return 0;
+}
+
+/**
+ * The other end of `export`. A run already here is left as it is if it matches
+ * and refused if it does not: a bundle that could overwrite a log would be a way
+ * to doctor the very history `verify` reads.
+ */
+function cmdImport(io: Io, store: RunStore, path: string | undefined): number {
+  if (!path) return fail(io, "import needs the path to a bundle");
+
+  const report = importBundle(parseBundle(readFileSync(path, "utf8")), store);
+  const held = report.added.length + report.present.length;
+
+  io.out(`${bold(path)} ${dim("→")} ${store.dir}\n`);
+  io.out(
+    dim(
+      `${plural(held, "run")}: ` +
+        (report.added.length === 0 ? "none new" : `added ${report.added.join(", ")}`) +
+        (report.present.length === 0 ? "" : `; already here ${report.present.join(", ")}`) +
+        "\n",
+    ),
+  );
+  if (!report.complete) {
+    io.out(yellow(`the lineage in it stops short: ${report.incomplete}\n`));
+  }
+  io.out(dim(`${cyan(`retrace verify ${report.root}`)} now has the runs it needs\n`));
+  return 0;
+}
+
+/**
  * The other half of `verify`. That one holds a log to itself and never executes;
  * this one executes and holds it to the world, which is the only way to find out
  * whether a prefix worth replaying is still a prefix worth believing.
@@ -909,6 +998,10 @@ function truncate(s: string, max: number): string {
 
 function describe(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+function plural(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
 }
 
 function fail(io: Io, message: string): number {

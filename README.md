@@ -524,6 +524,8 @@ retrace resume <run-id>       # carry on a run that stopped early, from its log
 retrace report <run-id>       # write the run as one self-contained HTML page
 retrace verify <run-id>       # hold the log to its own claims, and to its parent
 retrace recheck <run-id>      # …and ask the tools whether its answers still hold
+retrace export <run-id>       # the run and everything it was forked from, as one file
+retrace import <path>         # …read back into a store, so verify runs whole there
 ```
 
 `diff` is the one to reach for after a fork — it shows exactly which effect the two runs stopped sharing.
@@ -675,6 +677,61 @@ A check it cannot run — a lineage that leaves this store, a killed run with no
 totals yet — comes back skipped rather than passed, traced as far as it goes, and
 the last line says how much of the verification that leaves undone. In code it is
 `verifyRun(runId)`.
+
+### Taking a lineage with you
+
+`lineage` is the check that stops working when a run travels. A fork's log names
+the run it came from and nothing else, so a fork read on a machine that has never
+seen that run is a log claiming a free prefix with nothing to check the claim
+against: `parent` traces the one hop it can see, and `lineage` comes back
+skipped. That is the honest answer, and it is the answer you get for a run
+attached to a bug report, mailed to a colleague, or committed next to the code it
+was recorded against.
+
+`export` writes the run and every run above it as one file:
+
+```bash
+retrace export demo-forked -o lineage.jsonl
+```
+
+```
+demo-forked → lineage.jsonl
+2 runs, 48 events, 13KB
+1 run of lineage, back to a run forked from nothing — verify runs complete wherever this lands
+```
+
+```bash
+retrace import lineage.jsonl
+```
+
+```
+lineage.jsonl → .retrace/runs
+2 runs: added demo-original; already here demo-forked
+retrace verify demo-forked now has the runs it needs
+```
+
+It is the same JSONL the runs themselves are, one event to a line under a header
+naming what the file carries, so a bundle of a long lineage streams and diffs the
+way the logs inside it do. Nothing is recomputed on the way out or the way in —
+the events land in the receiving store exactly as they were recorded, which is
+what makes the `verify` on the far side the same check as the one at home rather
+than a check of the bundle.
+
+Two things it refuses. A run the receiving store already holds is left alone if
+the bundle agrees with it, event for event, and refused if it does not: a bundle
+that could overwrite a log would be a way to doctor the very history `verify`
+reads, arriving through the front door. And a chain that leaves the *exporting*
+store is bundled as far as it goes and says so, rather than passing a partial
+lineage off as a whole one:
+
+```
+the chain stops short: "demo-original" is not in this store — a verify of this
+bundle traces its lineage that far and reports the rest skipped, exactly as one
+here would
+```
+
+In code it is `collectBundle(runId, store)`, `serializeBundle`, `parseBundle` and
+`importBundle(bundle, store)`.
 
 ### Checking a log against the world
 
@@ -832,7 +889,9 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   thing — nothing that reads only a log can. `recheck` executes the tools and
   answers the second of those; the first is not a question anything here settles.
   And `verify` can only follow a lineage as far as the logs it has: a chain that
-  leaves the store is traced to that point and reported skipped, not passed.
+  leaves the store is traced to that point and reported skipped, not passed —
+  which is a fact about the store rather than about the run, and
+  [`export`](#taking-a-lineage-with-you) is how you hand it the rest.
 - **`recheck` executes your tools, on purpose.** It is the one command here that
   reaches the world by design, so a recorded `send_email` is sent again unless
   `--tool` keeps it out of the run — and a call that disagrees with the log is
@@ -847,7 +906,7 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 ## Status
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
-one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests and the `stale` marking built on them, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit and the `recheck` re-execution, including its `unstable` finding — is covered by 233 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests and the `stale` marking built on them, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit and the `recheck` re-execution including its `unstable` finding, and the lineage bundles `export` and `import` move between stores — is covered by 249 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -855,7 +914,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 233 tests, no network, no API key
+npm test           # 249 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build
