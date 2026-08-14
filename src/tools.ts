@@ -9,6 +9,12 @@ export interface ToolDefinition<I> {
    */
   description: string;
   inputSchema: Record<string, unknown>;
+  /**
+   * Set when running this does something that running it twice would do twice.
+   * A fork, a resume or a replay that goes past its log refuses to execute it
+   * rather than doing it again — see `Tool.irreversible`.
+   */
+  irreversible?: true;
   /** `context` is the journal: take time, ids and randomness from it to keep them replayable. */
   run(input: I, context: ToolContext): Promise<string> | string;
 }
@@ -19,6 +25,7 @@ export function tool<I = any>(definition: ToolDefinition<I>): Tool {
     name: definition.name,
     description: definition.description,
     inputSchema: definition.inputSchema,
+    ...(definition.irreversible ? { irreversible: true as const } : {}),
     run: definition.run as Tool["run"],
   };
 }

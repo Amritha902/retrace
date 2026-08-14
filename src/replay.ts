@@ -136,6 +136,15 @@ export interface ReenterOptions {
    * point and executes from there.
    */
   onDivergence?: DivergencePolicy;
+  /**
+   * Execute tools marked `irreversible` in the live tail instead of refusing to.
+   *
+   * Off by default, and this is the one place the default bites: the prefix a
+   * re-entry replays is free of side effects because nothing runs, and the tail
+   * is not. A tool that says it cannot be repeated is stopped at by name rather
+   * than repeated quietly — see `IrreversibleToolError`.
+   */
+  allowIrreversible?: boolean;
   onEvent?: RunOptions["onEvent"];
   /**
    * Fragments of each assistant turn. Steps served from the log deliver theirs
@@ -230,6 +239,7 @@ async function reenter(
       ...(Object.keys(overrides).length > 0 ? { overrides: Object.keys(overrides).sort() } : {}),
       ...origin,
     },
+    ...(options.allowIrreversible ? { allowIrreversible: true } : {}),
     ...(options.onEvent ? { onEvent: options.onEvent } : {}),
     ...(options.onStream ? { onStream: options.onStream } : {}),
   });

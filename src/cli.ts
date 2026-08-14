@@ -70,6 +70,9 @@ Options
                             away from a tool that writes something. A call that
                             disagrees with the log is run a second time, to tell
                             a moved corpus from a tool with no settled answer
+  --allow-irreversible      execute tools marked irreversible. Without it, a
+                            fork, resume or replay stops rather than making such
+                            a call a second time, and recheck holds it back
 `;
 
 const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
@@ -112,6 +115,8 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
   const overrides = readOverrides(takeEvery(args, "--set"));
   const onDivergence = readPolicy(takeOption(args, "--on-divergence"));
   const only = takeEvery(args, "--tool");
+  const allowIrreversible = takeFlag(args, "--allow-irreversible");
+  const reentry: Reentry = { overrides, onDivergence, allowIrreversible };
 
   const [command, ...rest] = args;
   const store = new RunStore(dir);
@@ -126,11 +131,11 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
     case "diff":
       return cmdDiff(io, store, rest[0], rest[1]);
     case "replay":
-      return cmdReplay(io, store, rest[0], modulePath, overrides, onDivergence);
+      return cmdReplay(io, store, rest[0], modulePath, reentry);
     case "fork":
-      return cmdFork(io, store, rest[0], atRaw, modulePath, overrides, onDivergence);
+      return cmdFork(io, store, rest[0], atRaw, modulePath, reentry);
     case "resume":
-      return cmdResume(io, store, rest[0], modulePath, overrides, onDivergence);
+      return cmdResume(io, store, rest[0], modulePath, reentry);
     case "stale":
       return cmdStale(io, store, rest[0]);
     case "report":
@@ -138,7 +143,7 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
     case "verify":
       return cmdVerify(io, store, rest[0]);
     case "recheck":
-      return cmdRecheck(io, store, rest[0], modulePath, only);
+      return cmdRecheck(io, store, rest[0], modulePath, only, allowIrreversible);
     case "export":
       return cmdExport(io, store, rest[0], out);
     case "import":
@@ -401,13 +406,23 @@ function span(from: number, to: number): string {
   return from === to ? String(from) : `${from}–${to}`;
 }
 
+/**
+ * What the three commands that re-enter a recorded run share: what to serve in
+ * place of the log, what to do when the log disagrees, and whether the live tail
+ * may execute a tool that cannot be taken back.
+ */
+interface Reentry {
+  overrides: Overrides;
+  onDivergence: "strict" | "live" | undefined;
+  allowIrreversible: boolean;
+}
+
 async function cmdReplay(
   io: Io,
   store: RunStore,
   runId: string | undefined,
   modulePath: string | undefined,
-  overrides: Overrides,
-  onDivergence: "strict" | "live" | undefined,
+  { overrides, onDivergence, allowIrreversible }: Reentry,
 ): Promise<number> {
   if (!runId) return fail(io, "replay needs a run id");
 
@@ -424,6 +439,7 @@ async function cmdReplay(
     store,
     overrides,
     onDivergence: onDivergence ?? "strict",
+    allowIrreversible,
     onEvent: (event) => printEvent(io, event),
   });
 
@@ -513,8 +529,7 @@ async function cmdFork(
   runId: string | undefined,
   atRaw: string | undefined,
   modulePath: string | undefined,
-  overrides: Overrides,
-  onDivergence: "strict" | "live" | undefined,
+  { overrides, onDivergence, allowIrreversible }: Reentry,
 ): Promise<number> {
   if (!runId) return fail(io, "fork needs a run id");
   if (atRaw === undefined) {
@@ -554,6 +569,7 @@ async function cmdFork(
     store,
     overrides,
     onDivergence: onDivergence ?? "strict",
+    allowIrreversible,
     onEvent: (event) => printEvent(io, event),
   });
 
@@ -576,8 +592,7 @@ async function cmdResume(
   store: RunStore,
   runId: string | undefined,
   modulePath: string | undefined,
-  overrides: Overrides,
-  onDivergence: "strict" | "live" | undefined,
+  { overrides, onDivergence, allowIrreversible }: Reentry,
 ): Promise<number> {
   if (!runId) return fail(io, "resume needs a run id");
   if (modulePath === undefined) {
@@ -606,6 +621,7 @@ async function cmdResume(
     store,
     overrides,
     onDivergence: onDivergence ?? "strict",
+    allowIrreversible,
     onEvent: (event) => printEvent(io, event),
   });
 
@@ -867,6 +883,7 @@ async function cmdRecheck(
   runId: string | undefined,
   modulePath: string | undefined,
   only: readonly string[],
+  allowIrreversible: boolean,
 ): Promise<number> {
   if (!runId) return fail(io, "recheck needs a run id");
   if (modulePath === undefined) {
@@ -879,6 +896,7 @@ async function cmdRecheck(
     tools: mod.tools ?? [],
     store,
     ...(only.length > 0 ? { only } : {}),
+    ...(allowIrreversible ? { allowIrreversible } : {}),
   });
 
   const total = report.calls.length;
@@ -966,6 +984,7 @@ const RECHECK_LABELS: Record<RecheckStatus, string> = {
   unstable: "unstable",
   substituted: "set",
   missing: "no tool",
+  irreversible: "held",
   skipped: "skipped",
 };
 
@@ -975,6 +994,7 @@ const MARK_WIDTH = Math.max(...Object.values(RECHECK_LABELS).map((l) => l.length
 function describeUnrun(report: RecheckReport): string {
   const reasons: Array<[RecheckStatus, string]> = [
     ["missing", "name a tool the module does not export"],
+    ["irreversible", "call a tool marked irreversible, which was held back rather than repeated"],
     ["skipped", "were not asked for"],
     ["substituted", "hold a value that was substituted rather than returned"],
   ];
@@ -1062,6 +1082,14 @@ function takeOption(args: string[], name: string): string | undefined {
   }
   args.splice(at, 2);
   return value;
+}
+
+/** An option with no value: present or not. */
+function takeFlag(args: string[], name: string): boolean {
+  const at = args.indexOf(name);
+  if (at === -1) return false;
+  args.splice(at, 1);
+  return true;
 }
 
 /** The same, for an option that may be given more than once. */

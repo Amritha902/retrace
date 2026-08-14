@@ -64,6 +64,34 @@ export class ReplayedFailure extends RetraceError {
   }
 }
 
+/**
+ * Thrown when a run that came out of a recorded one is about to execute a tool
+ * marked `irreversible` for real.
+ *
+ * Everything else here is safe to run twice, because the log answers where the
+ * world would have. The live tail of a fork is exactly where that stops being
+ * true — the prefix is free, and the step you changed is not — so this is the
+ * runtime saying so at the one moment the call can still be prevented.
+ */
+export class IrreversibleToolError extends RetraceError {
+  readonly toolName: string;
+  /** The effect key the call would have been recorded under. */
+  readonly effectKey: string;
+
+  constructor(toolName: string, effectKey: string, step: number) {
+    super(
+      `"${toolName}" is marked irreversible and this run would execute it live at ` +
+        `"${effectKey}". This run re-entered a recorded one, so the call would do the ` +
+        `thing a second time, for real. Fork at step ${step + 1} or later to replay the ` +
+        `recorded result instead, or pass allowIrreversible (--allow-irreversible) to ` +
+        `execute it.`,
+    );
+    this.name = "IrreversibleToolError";
+    this.toolName = toolName;
+    this.effectKey = effectKey;
+  }
+}
+
 export class ToolNotFoundError extends RetraceError {
   readonly toolName: string;
 

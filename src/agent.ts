@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { Budget } from "./budget.ts";
-import { BudgetExceededError, ToolNotFoundError } from "./errors.ts";
+import { BudgetExceededError, IrreversibleToolError, ToolNotFoundError } from "./errors.ts";
 import {
   DETERMINISTIC_KINDS,
   Journal,
@@ -39,6 +39,13 @@ export interface RunOptions {
   /** Preloaded effects. Supplied by `fork`; leave unset for a fresh run. */
   journal?: Journal;
   forkedFrom?: ForkOrigin;
+  /**
+   * Execute tools marked `irreversible` even in a run that came out of a
+   * recorded one. Off by default, and only consulted there: a fresh run has
+   * nothing to repeat, while a fork's live tail is a second execution of a call
+   * the log already holds the first of.
+   */
+  allowIrreversible?: boolean;
   /** Called for every event as it is written. Useful for live progress output. */
   onEvent?: (event: RetraceEvent) => void;
   /**
@@ -200,6 +207,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
     tools = [],
     budget: budgetSpec = {},
     store = new RunStore(),
+    allowIrreversible = false,
     onEvent,
     onStream,
   } = options;
@@ -466,6 +474,15 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
       }
 
       const live = toolUses.slice(ordinal);
+
+      // Checked over the whole tail before any of it runs, so a step whose
+      // second call cannot be repeated does not make its first one — the same
+      // reason the parallel branch below charges the batch up front rather than
+      // leaving half a step in the log.
+      if (options.forkedFrom !== undefined && !allowIrreversible) {
+        refuseIrreversible(live, toolsByName, step, ordinal);
+      }
+
       if (agent.parallelTools && live.length > 1) {
         // Charged before any of them starts: a batch that would run out of
         // budget halfway is refused whole, rather than leaving the log holding
@@ -568,6 +585,31 @@ function replayedReads(outcome: EffectOutcome<ToolResult>): RecordedRead[] {
  */
 export function toolKey(step: number, ordinal: number, name: string): string {
   return `step:${step}#${ordinal}:${name}`;
+}
+
+/**
+ * Stop a re-entered run before it repeats a call that cannot be taken back.
+ *
+ * The calls this is given are the ones the log could not answer, so every one of
+ * them is about to reach the world. In a fresh run that is the only time it
+ * happens and there is nothing to refuse; in a fork, a resume, or a replay that
+ * outlived its log, it is the *second* time — and a tool that says so is worth
+ * stopping the run for rather than sending the mail again.
+ *
+ * It throws rather than recording a failed effect: nothing executed, so there is
+ * no outcome to record, and the run ends `failed` with the reason on it.
+ */
+function refuseIrreversible(
+  live: readonly ToolUse[],
+  tools: ReadonlyMap<string, Tool>,
+  step: number,
+  from: number,
+): void {
+  for (const [i, call] of live.entries()) {
+    if (tools.get(call.name)?.irreversible) {
+      throw new IrreversibleToolError(call.name, toolKey(step, from + i, call.name), step);
+    }
+  }
 }
 
 /**

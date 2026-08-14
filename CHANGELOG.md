@@ -65,6 +65,22 @@ publish contains rather than what changed since something.
 - **`parallelTools`,** off by default. Tool bodies overlap; their results are
   journaled in the order the model asked for them, so the log is byte-identical
   to the sequential one.
+- **`irreversible: true` on a tool,** and a re-entered run stops rather than
+  making that call a second time. A replayed call is free of side effects
+  because nothing executes; the live tail of a fork, a resume, or a replay that
+  outlives its log is where that stops being true, and a `send_email` there was
+  previously sent again with only a caveat in the README to warn you. Now the
+  run ends `failed` with `IrreversibleToolError` naming the tool, the effect key
+  it would have been recorded under, and the two ways on — fork above the call so
+  it replays from the log, or `allowIrreversible` (`--allow-irreversible`) to
+  execute it. A fresh run never asks, having nothing to repeat. The whole of a
+  step's live tail is checked before any of it runs, so a step that asks for a
+  search and a send makes neither call rather than leaving half of one in the
+  log. `recheck` holds the same tools back and reports them `held`, since
+  re-executing recorded calls is the whole of what it does; naming one with
+  `--tool` is not consent, and `--allow-irreversible` is. The mark is not part of
+  `ToolSchema`: the model is never shown it, and the tool declarations the log
+  records — the ones `stale (tools)` compares — are unchanged by it.
 - **Request digests.** Every model effect records `requestHash`, a digest of the
   model, prompt, tools and conversation that produced it. A step served from the
   log whose digest no longer matches the request the loop just built is marked
@@ -226,7 +242,10 @@ network, readable in a light or a dark browser. `verify` prints one line per
 check and exits non-zero on a failure, so it can gate a pipeline. `recheck
 --module <path>` does the same for the tools, printing both answers where one
 has moved and today's two answers where one is `unstable`; `--tool <name>` is
-repeatable and keeps it away from the tools that should not run twice.
+repeatable and keeps it away from the tools that should not run twice, as does
+marking those tools `irreversible`.
+`--allow-irreversible`, on `fork`, `resume`, `replay` and `recheck`, is how you
+say a tool that declares it cannot be repeated should be executed anyway.
 `export <run-id> -o <path>` writes the run and its whole lineage as one file —
 `-` for stdout — and `import <path>` reads one into the store `--dir` names, so
 `verify` runs complete on a machine that has only ever seen the fork.
@@ -244,7 +263,7 @@ depend on.
 
 ### Verified by
 
-277 tests that run with no network and no API key, plus two `[live]` integration
+328 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:

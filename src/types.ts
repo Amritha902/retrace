@@ -70,6 +70,21 @@ export interface ToolContext {
 
 export interface Tool extends ToolSchema {
   /**
+   * Set when executing this tool does something to the world that executing it
+   * again would do again — sending mail, taking payment, filing a ticket.
+   *
+   * A fresh run calls it like any other tool; this is about the runs that
+   * re-enter a recorded one. A fork, a resume, or a replay that outlives its log
+   * executes the live tail for real, and a `send_email` in that tail is the one
+   * hazard the journal cannot answer in the world's place. Marked, the runtime
+   * stops and names the call rather than leaving the caller to remember.
+   *
+   * Deliberately not part of `ToolSchema`: the model is never shown it, and the
+   * tool declarations the log records — which `stale (tools)` compares — are the
+   * schema and nothing more.
+   */
+  irreversible?: true;
+  /**
    * Executed only when the journal has no recorded result for this call.
    * Must return something JSON-serializable — the return value goes in the log.
    */

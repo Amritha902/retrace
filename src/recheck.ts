@@ -21,6 +21,8 @@ export type RecheckStatus =
   | "substituted"
   /** The module exports no tool by that name. */
   | "missing"
+  /** Marked `irreversible`, so it was held back rather than done a second time. */
+  | "irreversible"
   /** Narrowed out by `only`. */
   | "skipped";
 
@@ -76,6 +78,12 @@ export interface RecheckOptions {
    * re-check a run whose tool list includes one you do not want run twice.
    */
   only?: readonly string[];
+  /**
+   * Execute tools marked `irreversible` too. Off by default: this command runs
+   * recorded calls again for real, and a tool that declares it cannot be
+   * repeated has already answered the question of whether it should be.
+   */
+  allowIrreversible?: boolean;
 }
 
 /**
@@ -99,7 +107,8 @@ export interface RecheckOptions {
  *
  * It executes real tools, which is the same hazard as forking past a
  * `send_email` — the recorded call runs again, for real, and a disagreeing one
- * runs twice. `only` is how you keep it to the ones that just read.
+ * runs twice. A tool marked `irreversible` is held back for that reason and
+ * reported rather than run; `only` narrows the rest to the ones that just read.
  */
 export async function recheckRun(
   runId: string,
@@ -124,7 +133,9 @@ export async function recheckEvents(
 
   const calls: RecheckedCall[] = [];
   for (const recorded of recordedToolCalls(events)) {
-    calls.push(await recheckOne(recorded, byName, wanted, journal));
+    calls.push(
+      await recheckOne(recorded, byName, wanted, journal, options.allowIrreversible === true),
+    );
   }
 
   return {
@@ -140,6 +151,7 @@ async function recheckOne(
   tools: ReadonlyMap<string, Tool>,
   wanted: ReadonlySet<string> | undefined,
   journal: Journal,
+  allowIrreversible: boolean,
 ): Promise<RecheckedCall> {
   const { step, key, call, value } = recorded;
   const base = { step, key, tool: call.name, input: call.input, recorded: value, durationMs: 0 };
@@ -148,7 +160,12 @@ async function recheckOne(
   // with it is the tool doing its job. There is nothing here to hold it to.
   if (recorded.overridden) return { ...base, status: "substituted" };
   if (wanted !== undefined && !wanted.has(call.name)) return { ...base, status: "skipped" };
-  if (!tools.has(call.name)) return { ...base, status: "missing" };
+  const tool = tools.get(call.name);
+  if (tool === undefined) return { ...base, status: "missing" };
+  // Naming it with `only` is not consent to run it: this command's whole job is
+  // to execute recorded calls a second time, and the tool has already said that
+  // is the one thing it cannot survive. `allowIrreversible` is the consent.
+  if (tool.irreversible && !allowIrreversible) return { ...base, status: "irreversible" };
 
   const startedAt = Date.now();
   const now = await invoke(tools, call, recordedContext(journal, step, key));

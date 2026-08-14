@@ -539,6 +539,69 @@ tail of a step runs at once. And the batch is charged against
 `budget.toolCalls` before any of it starts, so a step that cannot afford all its
 calls makes none of them, rather than leaving half a step in the log.
 
+## Tools that can't be taken back
+
+Everything here works because a replayed call returns the recorded answer without
+executing. The live tail of a fork is where that stops being true: it is the
+second time the run has reached that call, and the first time was real. A
+`send_email` there sends the email again.
+
+Mark the tool, and the runtime stops rather than sending it:
+
+```ts
+const sendEmail = tool({
+  name: "send_email",
+  description: "Send an email. Call this once the answer is ready to go out.",
+  inputSchema: objectSchema({ to: { type: "string" } }),
+  irreversible: true,
+  run: async ({ to }) => mailer.send(to),
+});
+```
+
+```
+$ retrace fork demo-original --at 'step:1#0:send_email' --module ./agent-module.ts
+...
+finished failed
+  "send_email" is marked irreversible and this run would execute it live at
+  "step:1#0:send_email". This run re-entered a recorded one, so the call would
+  do the thing a second time, for real. Fork at step 2 or later to replay the
+  recorded result instead, or pass allowIrreversible (--allow-irreversible) to
+  execute it.
+```
+
+Both ways out are in the message, and they are answers to different questions.
+Fork above the call and it comes out of the log like anything else in a replayed
+prefix — that is the fork that wanted the steps *after* the mail, not the mail.
+`--allow-irreversible` is the one that means send it.
+
+A fresh run never asks, because there is nothing to repeat; the mark costs
+nothing until you re-enter the run. A fork, a resume, or a replay that outlives
+its log is where it bites — [resume](#picking-a-run-back-up) being the case the
+caveat was always really about, where the tool may have done its work and died
+before the log could say so.
+
+The whole of a step's live tail is checked before any of it runs, so a step that
+asks for a search and a send makes neither call rather than leaving half of one
+in the log. And the mark is a claim the tool makes about itself today, not
+something the log remembers: take it off the tool in your module and the call
+executes.
+
+[`recheck`](#checking-a-log-against-the-world) holds the same tools back, for a
+sharper version of the same reason — re-executing recorded calls is the whole of
+what it does:
+
+```
+  same    step:0#0:lookup      {"term":"alpha"}
+  held    step:1#0:send_email  {"to":"reader@example.com"}
+
+still true as far as it goes: 1 of 2 recorded tool calls re-executed and agreed;
+1 call a tool marked irreversible, which was held back rather than repeated
+```
+
+Naming it with `--tool` is not consent: that flag narrows which tools run, and
+this one has already said what it thinks about being run. `--allow-irreversible`
+is the consent there too.
+
 ## Budgets
 
 Limits are enforced by the scheduler, so running out is a terminal state with a log entry — not an exception from somewhere inside a tool call.
@@ -988,10 +1051,12 @@ still true as far as it goes: 2 of 3 recorded tool calls re-executed and agreed;
 
 **It executes your tools, for real.** That is the point, and it is the same
 hazard as forking past a `send_email`, arriving at the moment you are auditing
-rather than running. `--tool <name>` is repeatable and limits execution to the
-tools you name, which is how you re-check the reads and leave the writes alone.
-It exits non-zero when something moved, so it can gate a pipeline. In code it is
-`recheckRun(runId, { tools })`.
+rather than running. A tool marked
+[`irreversible`](#tools-that-cant-be-taken-back) is reported `held` instead of
+run, and `--tool <name>` is repeatable and limits execution to the tools you
+name, which between them is how you re-check the reads and leave the writes
+alone. It exits non-zero when something moved, so it can gate a pipeline. In code
+it is `recheckRun(runId, { tools })`.
 
 ## Storage
 
@@ -1003,8 +1068,15 @@ The log holds normalized, provider-agnostic content, plus the provider's own blo
 
 Retrace guarantees the *agent loop* is deterministic given its journal. It does not make your tools deterministic. Specifically:
 
-- **Tool side effects are real.** A replayed tool call returns the recorded result without executing, which is the point — but a fork that goes live past a `send_email` tool will send the email again. Gate irreversible tools yourself.
-- **A resume re-runs the tool call that was in flight when the run died.** Its result never reached the log, so as far as the log is concerned it never ran — and the log is all `resume` has. A tool that had already done its work and was killed before returning does that work twice. This is the same hazard as the bullet above, arriving at the one moment you are least likely to be thinking about it.
+- **Tool side effects are real.** A replayed tool call returns the recorded
+  result without executing, which is the point — but a fork that goes live past a
+  `send_email` tool will send the email again. `irreversible: true` on the tool
+  is how you say so, and then a fork, a resume or a replay that outlives its log
+  stops and names the call rather than making it; `--allow-irreversible` is how
+  you say you meant it. That is a gate you have to remember to fit, not one the
+  runtime can infer: an unmarked tool is executed, because the mark is the tool's
+  claim about itself and there is nothing else to read it from.
+- **A resume re-runs the tool call that was in flight when the run died.** Its result never reached the log, so as far as the log is concerned it never ran — and the log is all `resume` has. A tool that had already done its work and was killed before returning does that work twice. This is the same hazard as the bullet above, arriving at the one moment you are least likely to be thinking about it — and the one the mark above is most worth having for, since the run that died is the one you had least warning about.
 - **Tools run sequentially by default**, in the order the model requested them. `parallelTools` overlaps them and still records deterministically — results are journaled in request order, and time and ids resolve by key — but the side-effect ordering isn't, which is why it is opt-in rather than on.
 - **Clock and randomness are journaled only if you take them from the tool
   context.** `ctx.now()`, `ctx.uuid()` and `ctx.random()` are recorded and
@@ -1076,8 +1148,9 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   description and not a verdict — a fork that diverges from its parent at the
   fork point is a fork working.
 - **`recheck` executes your tools, on purpose.** It is the one command here that
-  reaches the world by design, so a recorded `send_email` is sent again unless
-  `--tool` keeps it out of the run — and a call that disagrees with the log is
+  reaches the world by design, so a recorded `send_email` is sent again unless it
+  is marked `irreversible` or `--tool` keeps it out of the run — and a call that
+  disagrees with the log is
   executed *twice*, since asking again is what separates a moved corpus from a
   tool with no settled answer. A call that agreed is asked once. It hands each
   call the clock, ids and randomness the log recorded at the same slots, so a
@@ -1089,7 +1162,7 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 ## Status
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
-one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log, the `diff` comparison that holds two logs to the prefix they claim from the same source, and the `recheck` re-execution including its `unstable` finding, and the lineage bundles `export` and `import` move between stores — is covered by 306 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log, the `diff` comparison that holds two logs to the prefix they claim from the same source, and the `recheck` re-execution including its `unstable` finding, the lineage bundles `export` and `import` move between stores, and the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back — is covered by 328 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -1097,7 +1170,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 306 tests, no network, no API key
+npm test           # 328 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

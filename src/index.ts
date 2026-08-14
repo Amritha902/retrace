@@ -33,6 +33,7 @@ export {
 export {
   BudgetExceededError,
   DivergenceError,
+  IrreversibleToolError,
   ReplayedFailure,
   RetraceError,
   ToolNotFoundError,
