@@ -396,6 +396,54 @@ export function journalUpToStep(
     .map((e, i) => entryOf(e, i));
 }
 
+/**
+ * The same cut, made between two effects rather than between two steps:
+ * everything recorded before `index` replays.
+ *
+ * A step is the coarsest place a fork can re-enter a run, and sometimes it is
+ * too coarse. When the thing that went wrong is the third of a step's four
+ * searches, cutting at the step throws away the model turn that asked for them
+ * — and asking the model again gets you a different question, which is not the
+ * counterfactual you wanted.
+ */
+export function journalUpToEffect(
+  effects: readonly RecordedEffect[],
+  index: number,
+): JournalEntry[] {
+  return effects
+    .filter((e) => e.index < index)
+    .sort((a, b) => a.index - b.index)
+    .map((e, i) => entryOf(e, i));
+}
+
+/**
+ * The effect a fork was told to go live at, or an error saying why it can't be
+ * one.
+ *
+ * Only model and tool calls are fork points. A clock, id or random read
+ * resolves by key rather than by position and outlives the fork point on
+ * purpose — cutting the positional sequence there would leave the call that
+ * asked for it replayed and the read itself served anyway, which is the same
+ * run with a more confusing description.
+ */
+export function forkPointOf(effects: readonly RecordedEffect[], key: string): RecordedEffect {
+  const at = effects.find((e) => e.key === key);
+  if (at === undefined) {
+    throw new Error(
+      `this log records no effect "${key}". A fork point names the effect execution ` +
+        `goes live at, the way "retrace show" prints it — for example "step:2#0:search".`,
+    );
+  }
+  if (at.kind !== "model" && at.kind !== "tool") {
+    throw new Error(
+      `"${key}" is a ${at.kind} read inside "${key.split(NESTED)[0]}", not a call. A fork ` +
+        `point is a model or tool call; reads resolve by key and are served wherever the ` +
+        `run reaches them.`,
+    );
+  }
+  return at;
+}
+
 /** One log event as a journal entry, renumbered to its position in the prefix. */
 export function entryOf(effect: RecordedEffect, index: number): JournalEntry {
   return {

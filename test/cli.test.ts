@@ -366,7 +366,7 @@ test("fork says which argument it is missing", async (t) => {
 
   const noStep = capture();
   assert.equal(await main(["fork", "baseline", "--dir", dir, "--module", FIXTURE], noStep), 1);
-  assert.match(noStep.errors(), /--at <step>/);
+  assert.match(noStep.errors(), /--at <step\|effect-key>/);
 
   const noModule = capture();
   assert.equal(await main(["fork", "baseline", "--at", "2", "--dir", dir], noModule), 1);
@@ -375,7 +375,7 @@ test("fork says which argument it is missing", async (t) => {
   const badStep = capture();
   const args = ["fork", "baseline", "--at", "two", "--dir", dir, "--module", FIXTURE];
   assert.equal(await main(args, badStep), 1);
-  assert.match(badStep.errors(), /--at takes a step number, got "two"/);
+  assert.match(badStep.errors(), /--at takes a step number or an effect key, got "two"/);
 });
 
 test("an option with no value is an error, not a silent default", async (t) => {

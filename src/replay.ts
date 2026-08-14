@@ -3,7 +3,9 @@ import {
   applyOverrides,
   deterministicEntries,
   entryOf,
+  forkPointOf,
   Journal,
+  journalUpToEffect,
   journalUpToStep,
   type DivergencePolicy,
   type JournalEntry,
@@ -107,14 +109,12 @@ export function overriddenEffects(events: readonly RetraceEvent[]) {
   return effectsOf(events).filter((e) => e.overridden === true);
 }
 
-export interface ForkOptions {
+/**
+ * Everything a re-entry into a recorded run takes except where to re-enter it.
+ * `fork` adds the fork point; `replay` and `resume` fix it themselves.
+ */
+export interface ReenterOptions {
   provider: Provider;
-  /**
-   * Steps below this index are served from the parent's log. Step `atStep` is
-   * the first one that runs live, so `atStep: 0` is a fresh run with the
-   * parent's configuration and `atStep: Infinity` is a full replay.
-   */
-  atStep: number;
   tools?: Tool[];
   /** Fields to change relative to the parent. This is the point of forking. */
   agent?: Partial<AgentSpec>;
@@ -146,12 +146,40 @@ export interface ForkOptions {
 }
 
 /**
+ * Where a fork stops reading the log and starts executing. One or the other,
+ * never both — they are two ways of naming the same boundary, and a caller that
+ * gave both would be saying which one it meant twice.
+ */
+export type ForkPoint =
+  | {
+      /**
+       * Steps below this index are served from the parent's log. Step `atStep`
+       * is the first one that runs live, so `atStep: 0` is a fresh run with the
+       * parent's configuration and `atStep: Infinity` is a full replay.
+       */
+      atStep: number;
+      atEffect?: never;
+    }
+  | {
+      /**
+       * The effect execution goes live at, keyed the way `show` prints it —
+       * `"step:2#1:search"`. Everything recorded before it replays, including
+       * the earlier part of its own step, so the model turn that asked for the
+       * call is kept and only the call and what follows it run for real.
+       */
+      atEffect: string;
+      atStep?: never;
+    };
+
+export type ForkOptions = ReenterOptions & ForkPoint;
+
+/**
  * Re-run a recorded run with something changed.
  *
- * The prefix below `atStep` comes out of the parent's log — no network, no
- * tokens, no side effects — and everything from `atStep` onward executes for
- * real. That is the whole feature: changing a prompt at step 7 of a twelve-step
- * run costs six steps less than starting over.
+ * The prefix below the fork point comes out of the parent's log — no network,
+ * no tokens, no side effects — and everything from the fork point onward
+ * executes for real. That is the whole feature: changing a prompt at step 7 of
+ * a twelve-step run costs six steps less than starting over.
  */
 export async function fork(parentRunId: string, options: ForkOptions): Promise<RunResult> {
   return reenter(parentRunId, options, {});
@@ -165,7 +193,7 @@ export async function fork(parentRunId: string, options: ForkOptions): Promise<R
  */
 async function reenter(
   parentRunId: string,
-  options: ForkOptions,
+  options: ReenterOptions & { atStep?: number; atEffect?: string },
   origin: Partial<ForkOrigin>,
   retryFinalFailure = false,
 ): Promise<RunResult> {
@@ -182,11 +210,9 @@ async function reenter(
     retryFinalFailure ? withoutFinalFailure(inheritable) : inheritable,
     overrides,
   );
-  const entries: JournalEntry[] = Number.isFinite(options.atStep)
-    ? journalUpToStep(recorded, options.atStep)
-    : recorded.map(entryOf);
+  const cut = forkCut(recorded, options);
   const keyed = deterministicEntries(recorded);
-  refuseInertOverrides(overrides, recorded, entries, keyed, options.atStep);
+  refuseInertOverrides(overrides, recorded, cut.entries, keyed);
 
   const agent: AgentSpec = { ...started.agent, ...options.agent };
 
@@ -197,16 +223,42 @@ async function reenter(
     budget: options.budget ?? started.budget,
     store,
     runId: options.runId ?? newRunId("fork"),
-    journal: new Journal(entries, options.onDivergence ?? "strict", keyed),
+    journal: new Journal(cut.entries, options.onDivergence ?? "strict", keyed),
     forkedFrom: {
       runId: parentRunId,
-      atStep: Number.isFinite(options.atStep) ? options.atStep : "all",
+      ...cut.origin,
       ...(Object.keys(overrides).length > 0 ? { overrides: Object.keys(overrides).sort() } : {}),
       ...origin,
     },
     ...(options.onEvent ? { onEvent: options.onEvent } : {}),
     ...(options.onStream ? { onStream: options.onStream } : {}),
   });
+}
+
+/**
+ * How much of the parent's log this run preloads, and how it says so.
+ *
+ * The two fork points are the same boundary named two ways, so they collapse to
+ * one prefix here — and to one description in the log, where `atStep` is always
+ * the step execution went live in and `atEffect` narrows it to the effect
+ * within that step when the caller asked for one. A reader that knows nothing
+ * about effect fork points still learns something true from `atStep` alone.
+ */
+function forkCut(
+  recorded: readonly RecordedEffect[],
+  options: { atStep?: number; atEffect?: string },
+): { entries: JournalEntry[]; origin: Pick<ForkOrigin, "atStep" | "atEffect"> } {
+  if (options.atEffect !== undefined) {
+    const at = forkPointOf(recorded, options.atEffect);
+    return {
+      entries: journalUpToEffect(recorded, at.index),
+      origin: { atStep: at.step, atEffect: at.key },
+    };
+  }
+  const atStep = options.atStep ?? Number.POSITIVE_INFINITY;
+  return Number.isFinite(atStep)
+    ? { entries: journalUpToStep(recorded, atStep), origin: { atStep } }
+    : { entries: recorded.map(entryOf), origin: { atStep: "all" } };
 }
 
 /**
@@ -250,12 +302,12 @@ function refuseInertOverrides(
   recorded: readonly RecordedEffect[],
   entries: readonly JournalEntry[],
   keyed: readonly JournalEntry[],
-  atStep: number,
 ): void {
   const served = new Set([...entries, ...keyed].map((e) => e.key));
   for (const key of Object.keys(overrides)) {
     if (served.has(key)) continue;
-    const step = recorded.find((e) => e.key === key)?.step ?? atStep;
+    // `applyOverrides` has already refused a key this log does not record.
+    const step = recorded.find((e) => e.key === key)!.step;
     throw new Error(
       `override "${key}" is at step ${step}, which this fork runs live — the log is ` +
         `not consulted there, so nothing would be served in its place. Fork at step ` +
@@ -264,7 +316,7 @@ function refuseInertOverrides(
   }
 }
 
-export type ReplayOptions = Omit<ForkOptions, "atStep" | "agent" | "input">;
+export type ReplayOptions = Omit<ReenterOptions, "agent" | "input">;
 
 /**
  * Re-execute a run entirely from its log. Nothing reaches the network, and the
@@ -281,7 +333,7 @@ export async function replay(parentRunId: string, options: ReplayOptions): Promi
 }
 
 /** Everything a fork takes except the fork point: a resume replays all of it. */
-export type ResumeOptions = Omit<ForkOptions, "atStep">;
+export type ResumeOptions = ReenterOptions;
 
 /**
  * Carry on a run that stopped early — a crash, a kill, a limit it hit.

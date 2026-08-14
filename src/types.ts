@@ -206,11 +206,18 @@ export type RunStatus =
 export interface ForkOrigin {
   runId: string;
   /**
-   * Steps strictly below this index were replayed from the parent, or "all"
-   * for a full replay. A number, not Infinity — the log is JSON, and Infinity
-   * does not survive the round trip.
+   * The step execution went live in: everything below it was replayed from the
+   * parent, or "all" for a full replay. A number, not Infinity — the log is
+   * JSON, and Infinity does not survive the round trip.
    */
   atStep: number | "all";
+  /**
+   * Present when the fork point was an effect rather than a step, and then it
+   * is the effect execution went live at — inside `atStep`, whose earlier
+   * effects were replayed like the steps below it. Absent means the whole of
+   * `atStep` ran live.
+   */
+  atEffect?: string;
   /**
    * Effect keys whose recorded values this run was told to replace. Present
    * only on a counterfactual fork; the substituted values are in the effect

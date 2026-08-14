@@ -20,6 +20,16 @@ publish contains rather than what changed since something.
   goes live from the step that changed. A slot the log disagrees with raises a
   `DivergenceError` naming the effect, unless the caller asks for
   `onDivergence: "live"`.
+- **Fork points inside a step.** `fork(runId, { atEffect: "step:2#2:search" })`,
+  or `retrace fork … --at 'step:2#2:search'`, cuts the log between two calls
+  rather than between two steps: everything recorded before that call replays,
+  including the model turn that asked for it, and execution goes live at the
+  call itself. It is the move `recheck` leaves you wanting — re-run the call the
+  world moved under, without paying for the steps below it or losing the turn
+  that asked. Only model and tool calls can be fork points; naming a clock, id
+  or random read is an error, since those resolve by key and are served wherever
+  the run reaches them. The log records both `atStep` and `atEffect`, and
+  `verify` holds the fork to the finer of the two.
 - **`resume`.** A run killed partway through is carried on from its log: the
   whole prefix replays and execution goes live at the effect the log ends on, so
   a process that died at step 9 of 12 finishes for the price of three steps. It

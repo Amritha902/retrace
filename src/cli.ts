@@ -14,6 +14,7 @@ import {
   resume,
   staleEffects,
   summarize,
+  type ForkPoint,
 } from "./replay.ts";
 import { executed, recheckRun, type RecheckReport, type RecheckStatus } from "./recheck.ts";
 import { renderReport } from "./report.ts";
@@ -29,6 +30,7 @@ const USAGE = `retrace — inspect and re-run recorded agent runs
   retrace diff <run-a> <run-b>  compare two runs step by step
   retrace replay <run-id>       re-run it from the log, and check it reproduces
   retrace fork <run-id> --at N  replay the steps below N, then run live
+                                (--at <effect-key> re-enters mid-step instead)
   retrace resume <run-id>       carry on a run that stopped early, from its log
   retrace report <run-id>       write the run as one self-contained HTML page
   retrace verify <run-id>       check the log against its own claims, and what it
@@ -38,7 +40,10 @@ const USAGE = `retrace — inspect and re-run recorded agent runs
 
 Options
   --dir <path>              store directory (default: ${DEFAULT_STORE_DIR})
-  --at <n>                  first step a fork executes for real
+  --at <n|effect-key>       where a fork starts executing for real: a step
+                            number, or an effect key as show prints it, which
+                            replays the rest of that step and goes live at the
+                            call itself — "step:2#1:search"
   -o, --out <path>          where report writes its HTML; "-" for stdout
                             (default: <run-id>.html)
   --module <path>           module exporting the live half of the run — tools,
@@ -148,7 +153,11 @@ function cmdLs(io: Io, store: RunStore): number {
       const saved =
         s.totals && s.totals.savedUsd > 0 ? green(`  saved ${formatUsd(s.totals.savedUsd)}`) : "";
       const from = s.forkedFrom
-        ? dim(`  ← ${s.forkedFrom.runId} @ ${s.forkedFrom.resumed ? "resumed" : s.forkedFrom.atStep}`)
+        ? dim(
+            `  ← ${s.forkedFrom.runId} @ ${
+              s.forkedFrom.resumed ? "resumed" : (s.forkedFrom.atEffect ?? s.forkedFrom.atStep)
+            }`,
+          )
         : "";
       io.out(
         `${id.padEnd(width)}  ${padLabel(statusLabel(s.status), 16)}  ` +
@@ -174,7 +183,7 @@ function cmdShow(io: Io, store: RunStore, runId: string | undefined): number {
     const lineage = from.resumed
       ? `resumed from ${from.runId}, which stopped ${from.resumed.parentStatus} after ` +
         `${from.resumed.after} effect${from.resumed.after === 1 ? "" : "s"}`
-      : `forked from ${from.runId} at step ${from.atStep}`;
+      : `forked from ${from.runId} at ${forkPoint(from)}`;
     io.out(dim(`${lineage}${set.length > 0 ? `, with ${set.join(" and ")} set` : ""}\n`));
   }
   io.out(`\n${dim("input")}  ${truncate(summary.input, 200)}\n\n`);
@@ -402,11 +411,15 @@ async function cmdFork(
 ): Promise<number> {
   if (!runId) return fail(io, "fork needs a run id");
   if (atRaw === undefined) {
-    return fail(io, "fork needs --at <step>: the first step to run live");
+    return fail(io, "fork needs --at <step|effect-key>: where it starts running live");
   }
-  const atStep = Number(atRaw);
-  if (!Number.isInteger(atStep) || atStep < 0) {
-    return fail(io, `--at takes a step number, got "${atRaw}"`);
+  const at = readForkPoint(atRaw);
+  if (at === undefined) {
+    return fail(
+      io,
+      `--at takes a step number or an effect key, got "${atRaw}" — a key looks like ` +
+        `"step:2#0:search", as show prints it`,
+    );
   }
   if (modulePath === undefined) {
     return fail(io, "fork needs --module <path>: the live steps need tools and a provider");
@@ -416,16 +429,16 @@ async function cmdFork(
   const mod = await loadRunModule(modulePath);
   const agent = { ...parent.agent, ...mod.agent };
 
-  io.out(`${bold(runId)} ${dim(`→ fork at step ${atStep}`)}\n`);
-  io.out(
-    dim(
-      `${agent.name} · ${agent.model} · steps below ${atStep} replay, ${atStep} onward runs live\n\n`,
-    ),
-  );
+  const [where, what] =
+    at.atEffect === undefined
+      ? [`step ${at.atStep}`, `steps below ${at.atStep} replay, ${at.atStep} onward runs live`]
+      : [at.atEffect, `everything recorded before ${at.atEffect} replays, and it runs live`];
+  io.out(`${bold(runId)} ${dim(`→ fork at ${where}`)}\n`);
+  io.out(dim(`${agent.name} · ${agent.model} · ${what}\n\n`));
 
   const result = await fork(runId, {
     provider: mod.provider ?? (await anthropic()),
-    atStep,
+    ...at,
     tools: mod.tools ?? [],
     // Left undefined, each of these falls back to what the parent recorded.
     agent: mod.agent,
@@ -736,7 +749,15 @@ function origin(from: ForkOrigin): string {
   }
   return from.atStep === "all"
     ? `replayed from ${from.runId} in full`
-    : `forked from ${from.runId} at step ${from.atStep}`;
+    : `forked from ${from.runId} at ${forkPoint(from)}`;
+}
+
+/**
+ * The fork point in the words of the command that asked for it: a step, or the
+ * effect within it when the fork was told to re-enter mid-step.
+ */
+function forkPoint(from: ForkOrigin): string {
+  return from.atEffect ?? `step ${from.atStep}`;
 }
 
 /**
@@ -827,6 +848,17 @@ function readOverrides(pairs: readonly string[]): Overrides {
     }
   }
   return overrides;
+}
+
+/**
+ * `--at` takes either kind of fork point. A step is a number; an effect is the
+ * key `show` prints, which always carries a colon, so the two can't be mistaken
+ * for one another and anything that is neither is a typo worth naming.
+ */
+function readForkPoint(raw: string): ForkPoint | undefined {
+  const atStep = Number(raw);
+  if (Number.isInteger(atStep) && atStep >= 0) return { atStep };
+  return raw.includes(":") ? { atEffect: raw } : undefined;
 }
 
 function readPolicy(value: string | undefined): "strict" | "live" | undefined {

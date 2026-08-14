@@ -360,6 +360,14 @@ function checkParent(
     return skipped(name, `the run it came from ("${origin.runId}") could not be read: ${describe(cause)}`);
   }
   const byKey = new Map(recorded.map((e) => [`${e.kind}:${e.key}`, e]));
+  if (origin.atEffect !== undefined && !recorded.some((e) => e.key === origin.atEffect)) {
+    return failed(
+      name,
+      `this run says it went live at ${origin.atEffect}, and ${origin.runId} records no such ` +
+        `effect for it to have gone live at`,
+    );
+  }
+  const liveFrom = liveFromIndex(recorded, origin);
 
   let matched = 0;
   let substituted = 0;
@@ -375,13 +383,13 @@ function checkParent(
     // Clock, id and random reads are keyed rather than positional and outlive
     // the fork point on purpose, so only the run's shape is held to it.
     if (
-      typeof origin.atStep === "number" &&
+      liveFrom !== undefined &&
       (effect.kind === "model" || effect.kind === "tool") &&
-      effect.step >= origin.atStep
+      parent.index >= liveFrom
     ) {
       return failed(
         name,
-        `${effect.kind}:${effect.key} was replayed at step ${effect.step}, which this fork was meant to run live from step ${origin.atStep}`,
+        `${effect.kind}:${effect.key} was replayed, and this fork was meant to run live from ${describeForkPoint(origin)}`,
       );
     }
     if (effect.overridden) {
@@ -402,6 +410,30 @@ function checkParent(
     `${matched} replayed effect${matched === 1 ? " is" : "s are"} ${origin.runId}'s, value for value` +
       (substituted === 0 ? "" : `; ${substituted} substituted on purpose`),
   );
+}
+
+/**
+ * Where in the parent's effect sequence this fork was meant to stop replaying —
+ * the boundary its free prefix has to sit below.
+ *
+ * A step fork point and an effect fork point are the same boundary named two
+ * ways, so both resolve to an index in the parent's log and the check is one
+ * comparison rather than two. Undefined for a full replay or a resume, which
+ * are entitled to the whole log. Callers have already established that a named
+ * fork point is one of the parent's effects.
+ */
+function liveFromIndex(recorded: readonly Effect[], origin: ForkOrigin): number | undefined {
+  if (origin.atEffect !== undefined) {
+    return recorded.find((e) => e.key === origin.atEffect)!.index;
+  }
+  const atStep = origin.atStep;
+  if (typeof atStep !== "number") return undefined;
+  return recorded.find((e) => e.step >= atStep)?.index ?? recorded.length;
+}
+
+/** The fork point as the command that made it named it. */
+function describeForkPoint(origin: ForkOrigin): string {
+  return origin.atEffect ?? `step ${origin.atStep}`;
 }
 
 /**

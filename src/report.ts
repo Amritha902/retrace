@@ -89,7 +89,10 @@ function lineage(from: NonNullable<RunSummary["forkedFrom"]>): string {
   return from.resumed
     ? `resumed from ${parent}, which stopped ${escape(from.resumed.parentStatus)} after ` +
         `${from.resumed.after} effect${from.resumed.after === 1 ? "" : "s"}`
-    : `forked from ${parent} at step ${escape(String(from.atStep))}`;
+    : from.atEffect === undefined
+      ? `forked from ${parent} at step ${escape(String(from.atStep))}`
+      : `forked from ${parent} at <span class="mono">${escape(from.atEffect)}</span>, ` +
+        `inside step ${escape(String(from.atStep))}`;
 }
 
 /** The one sentence worth reading if you read nothing else on the page. */

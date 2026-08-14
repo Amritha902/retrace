@@ -173,6 +173,45 @@ const better = await fork(result.runId, {
 console.log(better.totals.savedUsd); // what the replayed prefix saved
 ```
 
+## Forking inside a step
+
+A step is the coarsest place to re-enter a run, and sometimes it is too coarse.
+A step that asked for four searches and went wrong on the third has a fork point
+in the middle of it: `atEffect` cuts there instead.
+
+```ts
+const again = await fork(result.runId, {
+  provider,
+  tools: [search],
+  atEffect: "step:2#2:search", // everything recorded before this replays; this runs live
+});
+```
+
+```bash
+retrace fork demo-original --at 'step:2#2:search' --module ./agent-module.ts
+# researcher · claude-opus-5 · everything recorded before step:2#2:search replays, and it runs live
+```
+
+The difference from `--at 3` is what happens to the model turn that asked for
+the calls. Forking at the step throws it away and asks the model again — which
+gets you a different question, and the answer to a different question is not the
+counterfactual you wanted. Forking at the effect keeps the turn, replays the
+searches before it, and executes from the one you named. The two earlier results
+come out of the log; the third comes from the corpus as it is today.
+
+That is the command [`recheck`](#checking-a-log-against-the-world) leaves you
+holding. It tells you which recorded call the world has moved under; `--at
+<that key>` is how you re-run the run from it without paying for the steps
+below it, or losing the turn that asked.
+
+A fork point is a model or tool call — `step:2` is the model turn of step 2, and
+forking there is the same run as forking at step 2, by the same boundary under
+two names. Clock, id and random reads are not fork points: they resolve by key
+and are served wherever the run reaches them, so cutting the sequence at one is
+refused rather than quietly meaning something else. The log records both halves
+of where it went live, `atStep` and `atEffect`, so `show`, `report` and `verify`
+all hold the fork to the finer of the two.
+
 Or verify a run reproduces exactly:
 
 ```ts
@@ -479,6 +518,7 @@ retrace cost <run-id>         # per-step spend
 retrace diff <run-a> <run-b>  # where two runs stopped agreeing
 retrace replay <run-id>       # re-run it from the log and check it reproduces
 retrace fork <run-id> --at N  # replay the steps below N, then run live
+retrace fork … --at <key>     # …or re-enter mid-step, at one recorded call
 retrace fork … --set k=v      # …serving v in place of the effect recorded at k
 retrace resume <run-id>       # carry on a run that stopped early, from its log
 retrace report <run-id>       # write the run as one self-contained HTML page
@@ -518,7 +558,11 @@ export const agent = { system: "You are a research analyst. Answer in ten words.
 
 ```bash
 retrace fork demo-original --at 3 --module ./agent-module.ts
+retrace fork demo-original --at 'step:2#2:search' --module ./agent-module.ts
 ```
+
+`--at` takes a step number, or an effect key as `show` prints it — see [forking
+inside a step](#forking-inside-a-step).
 
 Named exports and a `default` object both work. The file is imported for its exports, so it must not run anything at import time — see `examples/research.ts`, which guards its runner behind an entry-point check for exactly that reason. `--module` is optional for `replay`, and only matters there if the log stops short of the run it recorded.
 
@@ -665,7 +709,9 @@ fork off this run replays an answer the world has since changed
 
 That last line is the whole point of the command. Everything else here works to
 make a replayed prefix free; this is the one thing that says whether a free
-prefix is still worth having.
+prefix is still worth having. What to do about it is
+`retrace fork demo-forked --at 'step:2#0:search'` — [re-enter the run at the
+call that moved](#forking-inside-a-step), keeping everything above it.
 
 `moved` reads as *the world changed under a stable tool*, and that is only one
 of the two things that make a tool disagree with the log. The other is a tool
@@ -755,6 +801,15 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   tool replayable — nothing can, short of taking the value from `ctx` — but it
   is the difference between a caveat you have to remember and one the runtime
   will point at.
+- **A fork point inside a step keeps the model turn that asked.** `atEffect`
+  cuts the log between two calls rather than between two steps, so the call it
+  names executes with the input the *recorded* turn asked for. That is the
+  point — re-asking the model would get you a different question — but it does
+  mean the live call at the fork point is answering the parent's question, and
+  the fork's own log is the only place that says so. Only model and tool calls
+  can be fork points; a clock, id or random read resolves by key and is served
+  wherever the run reaches it, so naming one is refused rather than silently
+  meaning something else.
 - **Deterministic values are matched by slot, not by meaning.** A fork that reaches `step:4#0:search` gets whatever the parent recorded at `step:4#0:search`, even if the fork's step 4 is asking a different question. For a timestamp that is the point; if your tool derives something load-bearing from `ctx.random()`, know that it is keyed by position in the run.
 - **A model call that throws is recorded, and replays as a throw.** The failure
   goes in the log where the value would have gone, so a run that died on a 529
@@ -791,7 +846,8 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 
 ## Status
 
-Early, and not yet on npm. The core — journal, agent loop, fork, replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests and the `stale` marking built on them, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit and the `recheck` re-execution, including its `unstable` finding — is covered by 221 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
+one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests and the `stale` marking built on them, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit and the `recheck` re-execution, including its `unstable` finding — is covered by 233 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -799,7 +855,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 221 tests, no network, no API key
+npm test           # 233 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build
