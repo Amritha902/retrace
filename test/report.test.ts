@@ -72,6 +72,28 @@ function capture(): Io & { text(): string; errors(): string } {
   };
 }
 
+/** The same run, with the model throwing on the second turn. */
+async function recordFailure(dir: string, runId = "died"): Promise<RetraceEvent[]> {
+  const provider = new MockProvider(script());
+  const overloaded = Object.assign(new Error("the model is overloaded, try again"), {
+    name: "APIOverloadedError",
+  });
+  const result = await run("explain alpha", {
+    agent,
+    provider: {
+      name: "mock",
+      complete: async (request) => {
+        if (provider.callCount === 1) throw overloaded;
+        return provider.complete(request);
+      },
+    },
+    tools: [lookup],
+    store: new RunStore(dir),
+    runId,
+  });
+  return result.events;
+}
+
 test("the report is one file: no scripts, no external references", async (t) => {
   const html = render(await record(tempDir(t)));
 
@@ -185,6 +207,16 @@ test("a resumed run's report names the parent and the state it stopped in", asyn
     html,
     /resumed from <span class="mono">killed<\/span>, which stopped running after 1 effect<\/p>/,
   );
+});
+
+test("the call a run died on is a card of its own, not a hole in the page", async (t) => {
+  const html = render(await recordFailure(tempDir(t)), "died");
+
+  assert.match(html, /class="status bad">failed</);
+  assert.match(html, /step:1<\/span>/, "the effect that threw is on the page");
+  assert.match(html, /APIOverloadedError/);
+  assert.match(html, /the model is overloaded, try again/);
+  assert.match(html, /A replay of this log stops here too/);
 });
 
 test("a report of a run with nothing replayed says so plainly", async (t) => {

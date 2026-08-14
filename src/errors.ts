@@ -1,4 +1,4 @@
-import type { BudgetSpec, Totals } from "./types.ts";
+import type { BudgetSpec, RecordedFailure, Totals } from "./types.ts";
 
 export class RetraceError extends Error {}
 
@@ -36,6 +36,31 @@ export class DivergenceError extends RetraceError {
     this.index = index;
     this.expected = expected;
     this.actual = actual;
+  }
+}
+
+/**
+ * Raised in place of an effect the log records as having thrown.
+ *
+ * The run that died is the one you most want to rewind, and a log holding only
+ * the calls that worked would replay it into a different, working run. So the
+ * throw is recorded like any other outcome and raised again here.
+ *
+ * The message is the recorded one verbatim, so a replayed run fails with the
+ * same words the recorded one did. The class is not reconstructed — a log is
+ * JSON, and a `RateLimitError` that came back as one would be a lie about what
+ * this run reached. `recordedName` is what it was.
+ */
+export class ReplayedFailure extends RetraceError {
+  /** The effect that threw, as `kind:key` — `model:step:3`. */
+  readonly effectKey: string;
+  readonly recordedName: string;
+
+  constructor(effectKey: string, recorded: RecordedFailure) {
+    super(recorded.message);
+    this.name = "ReplayedFailure";
+    this.effectKey = effectKey;
+    this.recordedName = recorded.name;
   }
 }
 

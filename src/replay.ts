@@ -167,6 +167,7 @@ async function reenter(
   parentRunId: string,
   options: ForkOptions,
   origin: Partial<ForkOrigin>,
+  retryFinalFailure = false,
 ): Promise<RunResult> {
   const store = options.store ?? new RunStore();
   const parent = store.read(parentRunId);
@@ -176,7 +177,11 @@ async function reenter(
   }
 
   const overrides = options.overrides ?? {};
-  const recorded = applyOverrides(inherited(effectsOf(parent)), overrides);
+  const inheritable = inherited(effectsOf(parent));
+  const recorded = applyOverrides(
+    retryFinalFailure ? withoutFinalFailure(inheritable) : inheritable,
+    overrides,
+  );
   const entries: JournalEntry[] = Number.isFinite(options.atStep)
     ? journalUpToStep(recorded, options.atStep)
     : recorded.map(entryOf);
@@ -216,6 +221,21 @@ async function reenter(
  */
 function inherited(effects: readonly RecordedEffect[]): RecordedEffect[] {
   return effects.map(({ overridden, ...effect }) => effect);
+}
+
+/**
+ * Drop the throw a run ended on, so a resume retries the call rather than
+ * replaying the failure.
+ *
+ * A recorded failure is an outcome, and everything that reproduces a log serves
+ * it back — that is what makes a run that died on a 529 replayable at all. But
+ * resuming is the opposite intent: the call that killed the run is precisely
+ * the one you came back to make. Execution goes live at the effect the log ends
+ * on, and here the log ends on a failure, so that failure is the effect it goes
+ * live at. Only the last one — a throw ends the run, so there is never another.
+ */
+function withoutFinalFailure(effects: readonly RecordedEffect[]): RecordedEffect[] {
+  return effects.at(-1)?.failed === undefined ? [...effects] : effects.slice(0, -1);
 }
 
 /**
@@ -273,7 +293,10 @@ export type ResumeOptions = Omit<ForkOptions, "atStep">;
  * This is a replay that is allowed to run off the end of its log, and the
  * difference between the two is only intent: `replay` reports the divergence
  * when a run does not reproduce, `resume` expects to reach the end and keep
- * going. A run that ended with an answer has nothing to carry on from, so it is
+ * going. That intent decides one other thing. A run the model threw on ends its
+ * log with the throw, and a replay serves it back; a resume drops it and makes
+ * the call again, because retrying it is the reason you came back. A run that
+ * ended with an answer has nothing to carry on from, so it is
  * refused rather than quietly re-run — the recorded prefix would replay to the
  * same answer and the new log would be a duplicate that looked like progress.
  */
@@ -300,5 +323,6 @@ export async function resume(parentRunId: string, options: ResumeOptions): Promi
       onDivergence: options.onDivergence ?? "strict",
     },
     { resumed: { after: effectsOf(events).length, parentStatus: parent.status } },
+    true,
   );
 }

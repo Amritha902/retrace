@@ -61,6 +61,28 @@ async function record(dir: string): Promise<void> {
   });
 }
 
+/** The same run, with the model throwing on the second turn: three effects. */
+async function recordFailure(dir: string): Promise<void> {
+  const provider = new MockProvider(script());
+  const overloaded = Object.assign(new Error("the model is overloaded, try again"), {
+    name: "APIOverloadedError",
+  });
+  const flaky = {
+    name: "mock",
+    complete: async (request: Parameters<typeof provider.complete>[0]) => {
+      if (provider.callCount === 1) throw overloaded;
+      return provider.complete(request);
+    },
+  };
+  await run("explain alpha and beta", {
+    agent,
+    provider: flaky,
+    tools: [lookup],
+    store: new RunStore(dir),
+    runId: "died",
+  });
+}
+
 function capture(): Io & { text(): string; errors(): string } {
   let out = "";
   let err = "";
@@ -396,6 +418,48 @@ test("show marks a fork's replayed prefix and its live steps apart", async (t) =
   assert.match(io.text(), /replayed {2}tool {3}step:0#0:lookup/);
   assert.match(io.text(), /live {6}model {2}step:2/);
   assert.match(io.text(), /forked from baseline at step 2/);
+});
+
+test("show prints the call a run died on, and what it threw", async (t) => {
+  const dir = tempDir(t);
+  await recordFailure(dir);
+  const io = capture();
+
+  const code = await main(["show", "died", "--dir", dir], io);
+
+  assert.equal(code, 0, io.errors());
+  assert.match(io.text(), /live {6}model {2}step:1/);
+  assert.match(io.text(), /threw the model is overloaded, try again/);
+  assert.match(io.text(), /finished failed/);
+});
+
+test("replay reproduces the failure a run died on, without a module", async (t) => {
+  const dir = tempDir(t);
+  await recordFailure(dir);
+  const io = capture();
+
+  // No module means no provider: reaching a live model call would be the
+  // LOG_ONLY error rather than a reproduction. The failure comes out of the log
+  // like any other outcome, so nothing is reached.
+  const code = await main(["replay", "died", "--dir", dir], io);
+
+  assert.equal(code, 0, io.errors());
+  assert.match(io.text(), /reproduced 3 effects, identical/);
+  assert.match(io.text(), /threw the model is overloaded, try again/);
+  assert.doesNotMatch(io.text(), /\blive\b/, "every effect must come from the log");
+});
+
+test("resume retries the call a run died on, and carries it to the end", async (t) => {
+  const dir = tempDir(t);
+  await recordFailure(dir);
+  const io = capture();
+
+  const code = await main(["resume", "died", "--dir", dir, "--module", FIXTURE], io);
+
+  assert.equal(code, 0, io.errors());
+  assert.match(io.text(), /stopped failed; the log replays, then it runs live/);
+  assert.match(io.text(), /picked up at step 1/);
+  assert.doesNotMatch(io.text(), /threw/, "the retried call is the point of resuming");
 });
 
 test("a module can arrive as a default export", async () => {

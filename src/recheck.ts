@@ -159,7 +159,8 @@ function recordedToolCalls(events: readonly RetraceEvent[]): RecordedToolCall[] 
 
   const calls: RecordedToolCall[] = [];
   for (const effect of effects) {
-    if (effect.kind !== "model") continue;
+    // A call that threw asked for nothing, so there is nothing to re-check.
+    if (effect.kind !== "model" || effect.failed) continue;
     const asked = (effect.value as ModelResponse).content.filter(
       (b): b is ToolUse => b.type === "tool_use",
     );

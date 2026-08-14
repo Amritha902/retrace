@@ -35,6 +35,19 @@ publish contains rather than what changed since something.
 - **`ctx.now()`, `ctx.uuid()` and `ctx.random()`** are journaled and keyed by
   the call they happened in, so a fork's live steps read the values the parent
   recorded at the same slots.
+- **A model call that throws is an outcome, not a gap.** The failure is
+  recorded where the value would have gone, as `failed: { name, message }`, so a
+  run that died on a 529 replays into the same error without calling anything.
+  Previously the log held only the calls that worked, so a replay ran off the
+  end of it and made the call live — and if that call succeeded, a failed run
+  came back `completed` and looked like a reproduction. A replay raises
+  `ReplayedFailure` carrying the recorded message and the original error's name;
+  the class is not reconstructed, because a log is JSON. `resume` is the
+  deliberate exception: it drops the trailing failure and retries that call,
+  which is what resuming a broken run is for. An override on the effect that
+  threw hands it the answer it never gave. `verify` compares outcomes rather
+  than values, so a log that turns a recorded throw into an answer fails
+  `parent`, and one that records work after a throw fails `shape`.
 - **Streaming.** Pass `onStream` and the loop takes the provider's streaming
   path. Fragments never reach the log — the assembled message does — so a run
   recorded with streaming on and one recorded with it off produce identical

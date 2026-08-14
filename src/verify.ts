@@ -121,6 +121,19 @@ function checkShape(events: readonly RetraceEvent[]): Check {
     }
   }
 
+  // A throw ends the run, so a log that carries on past one is describing
+  // something the loop cannot do: a spliced log, or a failure edited in.
+  const all = events.filter((e): e is Effect => e.type === "effect");
+  const threw = all.findIndex((e) => e.failed !== undefined);
+  if (threw !== -1 && threw !== all.length - 1) {
+    const event = all[threw]!;
+    return failed(
+      name,
+      `${event.kind}:${event.key} is recorded as having thrown, but the log records ` +
+        `${plural(all.length - 1 - threw, "more effect")} after it`,
+    );
+  }
+
   const finishedAt = events.findIndex((e) => e.type === "run.finished");
   if (finishedAt !== -1 && finishedAt !== events.length - 1) {
     return failed(
@@ -375,7 +388,7 @@ function checkParent(
       substituted++;
       continue;
     }
-    if (fingerprint(effect.value) !== fingerprint(parent.value)) {
+    if (outcomeOf(effect) !== outcomeOf(parent)) {
       return failed(
         name,
         `${effect.kind}:${effect.key} was served a different value than ${origin.runId} recorded for it`,
@@ -544,7 +557,7 @@ type Trail =
  */
 function trace(runId: string, effect: Effect, ancestry: Ancestry): Trail {
   const lookup = `${effect.kind}:${effect.key}`;
-  let below = { runId, value: effect.value };
+  let below = { runId, outcome: outcomeOf(effect) };
 
   for (const ancestor of ancestry.chain) {
     const recorded = ancestor.effects.get(lookup);
@@ -554,7 +567,7 @@ function trace(runId: string, effect: Effect, ancestry: Ancestry): Trail {
         detail: `${lookup} was served from the log, but ${ancestor.runId} in this run's lineage records no such effect`,
       };
     }
-    if (fingerprint(recorded.value) !== fingerprint(below.value)) {
+    if (outcomeOf(recorded) !== below.outcome) {
       return {
         kind: "failed",
         detail: `${ancestor.runId} records a different value for ${lookup} than ${below.runId}, which took it from there`,
@@ -562,7 +575,7 @@ function trace(runId: string, effect: Effect, ancestry: Ancestry): Trail {
     }
     if (recorded.overridden) return { kind: "substituted" };
     if (!recorded.replayed) return { kind: "executed", runId: ancestor.runId };
-    below = { runId: ancestor.runId, value: recorded.value };
+    below = { runId: ancestor.runId, outcome: outcomeOf(recorded) };
   }
 
   if (ancestry.incomplete !== undefined) return { kind: "untraced" };
@@ -572,6 +585,18 @@ function trace(runId: string, effect: Effect, ancestry: Ancestry): Trail {
       `${lookup} is free in every run back to ${below.runId}, which records no run to have come ` +
       `from — nothing in this lineage ever executed it`,
   };
+}
+
+/**
+ * What an effect came back with, as one comparable string.
+ *
+ * A throw is an outcome as much as a value is, and comparing only `value` would
+ * let a log that turned a recorded failure into a success — or a success into a
+ * failure — pass as the prefix its parent recorded. That is exactly the
+ * doctoring these two checks exist to catch.
+ */
+function outcomeOf(effect: Pick<Effect, "value" | "failed">): string {
+  return fingerprint({ value: effect.value, failed: effect.failed ?? null });
 }
 
 function plural(n: number, noun: string): string {

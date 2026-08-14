@@ -267,6 +267,33 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
             : provider.complete(request),
         { hash: requestHash, facets },
       );
+      emit({
+        type: "effect",
+        step,
+        index: modelCall.index,
+        kind: "model",
+        key: `step:${step}`,
+        value: modelCall.failed ? null : modelCall.value,
+        replayed: modelCall.replayed,
+        durationMs: modelCall.durationMs,
+        requestHash,
+        requestFacets: facets,
+        ...(modelCall.failed ? { failed: modelCall.failed } : {}),
+        ...(modelCall.stale ? { stale: true } : {}),
+        // Recorded rather than derived: this log holds the request this run
+        // built, and the one it no longer matches is in the parent's.
+        ...(modelCall.staleFacets.length > 0
+          ? { staleFacets: orderFacets(modelCall.staleFacets) }
+          : {}),
+        ...(modelCall.overridden ? { overridden: true } : {}),
+      });
+
+      // Only now that the log holds it. The run is over either way, and the
+      // catch below turns this into the `failed` status; what the event above
+      // buys is a log that replays into the same failure instead of into a
+      // live call that might succeed.
+      if (modelCall.failed) throw modelCall.thrown;
+
       const response = modelCall.value;
 
       // The stream is a view of the model call, never an effect of its own, so
@@ -279,26 +306,6 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
           onStream({ step, replayed: modelCall.replayed, delta });
         }
       }
-
-      emit({
-        type: "effect",
-        step,
-        index: modelCall.index,
-        kind: "model",
-        key: `step:${step}`,
-        value: response,
-        replayed: modelCall.replayed,
-        durationMs: modelCall.durationMs,
-        requestHash,
-        requestFacets: facets,
-        ...(modelCall.stale ? { stale: true } : {}),
-        // Recorded rather than derived: this log holds the request this run
-        // built, and the one it no longer matches is in the parent's.
-        ...(modelCall.staleFacets.length > 0
-          ? { staleFacets: orderFacets(modelCall.staleFacets) }
-          : {}),
-        ...(modelCall.overridden ? { overridden: true } : {}),
-      });
 
       const charged = budget.charge(response.model, response.usage, modelCall.replayed);
       emit({

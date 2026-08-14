@@ -17,11 +17,13 @@ export { Budget } from "./budget.ts";
 export {
   BudgetExceededError,
   DivergenceError,
+  ReplayedFailure,
   RetraceError,
   ToolNotFoundError,
 } from "./errors.ts";
 export {
   applyOverrides,
+  describeFailure,
   DETERMINISTIC_KINDS,
   deterministicEntries,
   entryOf,

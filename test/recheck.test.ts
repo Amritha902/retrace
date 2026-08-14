@@ -73,6 +73,38 @@ function named(report: RecheckReport, key: string): RecheckedCall {
   return found;
 }
 
+test("recheck reads a run that died mid-flight, and re-checks the calls it made", async (t) => {
+  const store = fresh(t);
+  const provider = new MockProvider(script());
+  const overloaded = Object.assign(new Error("the model is overloaded, try again"), {
+    name: "APIOverloadedError",
+  });
+  await run("explain alpha and beta", {
+    agent,
+    provider: {
+      name: "mock",
+      complete: async (request) => {
+        if (provider.callCount === 1) throw overloaded;
+        return provider.complete(request);
+      },
+    },
+    tools: [lookup],
+    store,
+    runId: "died",
+  });
+
+  // The call that threw asked for nothing, so it contributes no tool call —
+  // the one the run did get through is still there to be held to the world.
+  const report = await recheckRun("died", { tools: [lookup], store });
+
+  assert.deepEqual(
+    report.calls.map((c) => [c.key, c.status]),
+    [["step:0#0:lookup", "same"]],
+  );
+  assert.equal(report.ok, true);
+  assert.equal(report.complete, true);
+});
+
 test("a log whose tools still agree with it comes back complete and still true", async (t) => {
   const store = fresh(t);
   await record(store);

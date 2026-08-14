@@ -209,6 +209,11 @@ every line before it was complete before it was started — so the prefix is sti
 a truthful record of what happened. A broken line anywhere *but* the end is real
 corruption and still an error.
 
+A run that died because the *model* threw ends its log with the throw. `resume`
+drops that last effect and makes the call again — see [the run that
+broke](#the-run-that-broke) — which is the one place anything here declines to
+serve a recorded value, and it is the whole reason you would resume such a run.
+
 Two things worth knowing before you run it. A tool that executed but whose
 result never reached the log will execute again, because from the log's point of
 view it never ran; the [determinism caveats](#determinism-honestly) about
@@ -223,6 +228,64 @@ await resume(runId, { provider, tools: [search], budget: { usd: 20 } });
 A run that ended with an answer is refused rather than re-run: the prefix would
 replay to the same answer, and the new log would look like progress that never
 happened. `replay` is the command for that.
+
+## The run that broke
+
+The run you most want to rewind is the one that died, and a throw is an outcome
+like any other — so it goes in the log where the value would have gone:
+
+```
+$ retrace show died
+
+died  failed
+analyst · claude-opus-5 · via anthropic
+
+step 0
+  live      model  step:0  1980ms
+  live      tool   step:0#0:search  412ms
+            → 3 results for "market size"
+step 1
+  live      model  step:1  240ms
+        threw  the model is overloaded, try again
+
+finished failed
+  the model is overloaded, try again
+```
+
+That log replays into the same failure, with the same message, without calling
+anything:
+
+```bash
+retrace replay died
+# reproduced 3 effects, identical · $0.4600 not spent
+```
+
+Before this the failure was the one thing the log did not hold, so a replay ran
+off the end of it and made the call live — and a call that succeeded this time
+turned a failed run into a completed one that looked like a reproduction. Now
+`replay`, `fork` and `report` all treat a throw as an outcome, and the run that
+broke is as rewindable as the run that worked.
+
+`resume` is the exception, and deliberately: retrying the call the run died on
+is the reason you came back to it. The steps below it replay, the failure is
+dropped, and that call is made again.
+
+```bash
+retrace resume died --module ./agent-module.ts
+# picked up at step 1: 2 effects replayed, 3 ran live · saved $0.4600
+```
+
+The other way to ask is to not re-run it at all. An
+[override](#what-if-it-had-said-something-else) on the effect that threw hands
+it the answer it never gave, and the run carries on from there as if the model
+had replied:
+
+```bash
+retrace fork died --at 2 --set 'step:1={"model":"claude-opus-5","content":[…]}' --module ./agent-module.ts
+```
+
+The log then holds a value and no failure, marked `set` — an effect cannot both
+return that and have thrown.
 
 ## What if it had said something else
 
@@ -648,6 +711,14 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 - **Tools run sequentially by default**, in the order the model requested them. `parallelTools` overlaps them and still records deterministically — results are journaled in request order, and time and ids resolve by key — but the side-effect ordering isn't, which is why it is opt-in rather than on.
 - **Clock and randomness are journaled only if you take them from the tool context.** `ctx.now()`, `ctx.uuid()` and `ctx.random()` are recorded and stable; a tool that calls `Date.now()` directly still reads the real clock and may branch differently when it goes live.
 - **Deterministic values are matched by slot, not by meaning.** A fork that reaches `step:4#0:search` gets whatever the parent recorded at `step:4#0:search`, even if the fork's step 4 is asking a different question. For a timestamp that is the point; if your tool derives something load-bearing from `ctx.random()`, know that it is keyed by position in the run.
+- **A model call that throws is recorded, and replays as a throw.** The failure
+  goes in the log where the value would have gone, so a run that died on a 529
+  replays into the same error without calling anything — which it did not do
+  before, and the live call it used to make could succeed and turn a failed run
+  into a completed one. What survives is the message and the error's name, not
+  its class: a log is JSON, and a replay raises `ReplayedFailure` carrying both.
+  `resume` is the deliberate exception — it drops the trailing failure and
+  retries the call, because that is what resuming a broken run is for.
 - **Streaming is a view of a model call, not an effect.** Fragments never reach the log; the message they assemble into does. A replayed step reconstructs its fragments from the log, one per content block, so you get the same text back but not the same cadence.
 - **Changing `input`, the prompt or the tools on a fork with `atStep > 0` does nothing for the replayed steps** — those model calls come from the log, which was produced with the old ones. That is the point of forking, and since it is easy to forget, the log now marks each such step `stale`: replayed, and recorded against a request this run no longer builds. Fork at 0 to change what the replayed steps saw.
 - **The digest behind `stale` covers what was asked, not the world.** For a model call that is the request: model, system prompt, tools, conversation, token and thinking settings — all of it, and each of them separately, so the log names which one moved rather than only that one did. For a tool call it is the input the model supplied, under the facet `input`. A tool that returns something different today because a database moved underneath it is not something either digest can see. Nor is the list a diff: it says the system prompt changed, not what it changed to, because a digest is all the log keeps.
@@ -673,7 +744,7 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 
 ## Status
 
-Early, and not yet on npm. The core — journal, agent loop, fork, replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests and the `stale` marking built on them, value overrides, the HTML report, streaming, parallel tool calls, the `verify` audit and the `recheck` re-execution — is covered by 202 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+Early, and not yet on npm. The core — journal, agent loop, fork, replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests and the `stale` marking built on them, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit and the `recheck` re-execution — is covered by 217 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -681,7 +752,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 202 tests, no network, no API key
+npm test           # 217 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

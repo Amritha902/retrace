@@ -1,4 +1,5 @@
-import { DivergenceError } from "./errors.ts";
+import { DivergenceError, ReplayedFailure } from "./errors.ts";
+import type { RecordedFailure } from "./types.ts";
 
 /**
  * A digest of whatever a caller fed an effect, recorded beside its result.
@@ -23,6 +24,8 @@ export interface JournalEntry {
   kind: string;
   key: string;
   value: unknown;
+  /** Set when what was recorded here is a throw rather than a value. */
+  failed?: RecordedFailure;
   stamp?: Stamp;
   /** Set when this value was substituted for the recorded one. See `applyOverrides`. */
   overridden?: true;
@@ -61,6 +64,21 @@ export interface EffectOutcome<T> {
    * a replay is supposed to reproduce the log, not a shorter version of it.
    */
   nested: readonly JournalEntry[];
+  /**
+   * Set when the effect threw instead of returning, and `value` means nothing.
+   *
+   * The journal does not raise it, because a failure has to reach the log
+   * before it reaches the caller — an effect that threw its way past `emit`
+   * would leave the run's own log unable to reproduce the run. So the caller
+   * records this and then raises `thrown`.
+   */
+  failed?: RecordedFailure;
+  /**
+   * What to raise once `failed` has been recorded: the original error when the
+   * effect just threw, and a `ReplayedFailure` carrying the recorded message
+   * when the log is the one saying it did.
+   */
+  thrown?: unknown;
 }
 
 export type DivergencePolicy = "strict" | "live";
@@ -153,6 +171,12 @@ export class Journal {
           overridden: entry.overridden === true,
           durationMs: 0,
           nested: this.takeNested(key),
+          ...(entry.failed === undefined
+            ? {}
+            : {
+                failed: entry.failed,
+                thrown: new ReplayedFailure(`${kind}:${key}`, entry.failed),
+              }),
         };
       }
       if (this.onDivergence === "strict") {
@@ -165,16 +189,29 @@ export class Journal {
     }
 
     const startedAt = Date.now();
-    const value = await execute();
+    const settled: { value?: T; thrown?: unknown; failed?: RecordedFailure } = {};
+    try {
+      settled.value = await execute();
+    } catch (cause) {
+      // Handed back rather than raised: the caller has to write it to the log
+      // before it goes anywhere, or the run's own log could not reproduce it.
+      // The original error is kept so a caller that catches a typed provider
+      // error still gets one.
+      settled.thrown = cause;
+      settled.failed = describeFailure(cause);
+    }
     return {
       index,
-      value,
+      value: settled.value as T,
       replayed: false,
       stale: false,
       staleFacets: [],
       overridden: false,
       durationMs: Date.now() - startedAt,
       nested: [],
+      ...(settled.failed === undefined
+        ? {}
+        : { failed: settled.failed, thrown: settled.thrown }),
     };
   }
 
@@ -267,6 +304,13 @@ function movedFacets(recorded: Stamp | undefined, offered: Stamp | undefined): s
   return [...new Set([...Object.keys(was), ...Object.keys(now)])].filter((n) => was[n] !== now[n]);
 }
 
+/** Whatever was thrown, reduced to the two fields that survive a JSON log. */
+export function describeFailure(cause: unknown): RecordedFailure {
+  return cause instanceof Error
+    ? { name: cause.name, message: cause.message }
+    : { name: "Error", message: String(cause) };
+}
+
 /** Build the key under which an effect nested inside `ownerKey` is recorded. */
 export function nestedKey(ownerKey: string, kind: string, ordinal: number): string {
   return `${ownerKey}${NESTED}${kind}:${ordinal}`;
@@ -279,6 +323,8 @@ export interface RecordedEffect {
   kind: string;
   key: string;
   value: unknown;
+  /** Set when the log records a throw here rather than a value. */
+  failed?: RecordedFailure;
   /** Digest of the model request this effect answered; becomes the entry's stamp. */
   requestHash?: string;
   /** The same digest per component; becomes the stamp's facets. */
@@ -317,8 +363,14 @@ export function applyOverrides(
     );
   }
 
-  return effects.map((e) =>
-    Object.hasOwn(overrides, e.key) ? { ...e, value: substitute(e, overrides[e.key]), overridden: true } : e,
+  // `failed` is dropped rather than kept: an override says what the effect
+  // returned, and an effect cannot both return that and have thrown. Handing a
+  // value to the call a run died on is the counterfactual worth having — what
+  // the run would have done if the model had not refused to answer.
+  return effects.map(({ failed, ...e }) =>
+    Object.hasOwn(overrides, e.key)
+      ? { ...e, value: substitute(e, overrides[e.key]), overridden: true as const }
+      : { ...e, ...(failed === undefined ? {} : { failed }) },
   );
 }
 
@@ -351,6 +403,7 @@ export function entryOf(effect: RecordedEffect, index: number): JournalEntry {
     kind: effect.kind,
     key: effect.key,
     value: effect.value,
+    ...(effect.failed === undefined ? {} : { failed: effect.failed }),
     ...(effect.requestHash === undefined
       ? {}
       : {

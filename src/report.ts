@@ -178,7 +178,8 @@ function timeline(
 function toolRequests(effects: readonly Effect[]): Map<string, ContentBlock & { type: "tool_use" }> {
   const requests = new Map<string, ContentBlock & { type: "tool_use" }>();
   for (const effect of effects) {
-    if (effect.kind !== "model") continue;
+    // A call that threw requested nothing, so there is nothing here to key.
+    if (effect.kind !== "model" || effect.failed) continue;
     const uses = (effect.value as ModelResponse).content.filter(
       (b): b is ContentBlock & { type: "tool_use" } => b.type === "tool_use",
     );
@@ -232,6 +233,17 @@ function cardsFor(
 }
 
 function modelCard(effect: Effect): string {
+  if (effect.failed) {
+    return card("failed", [
+      rowHead(mark(effect), "model", effect.key, effect.durationMs),
+      `<p class="call"><span class="mono">${escape(effect.failed.name)}</span>` +
+        ` <span class="tag failed">threw</span></p>`,
+      `${caption("error")}<pre class="result">${escape(effect.failed.message)}</pre>`,
+      `<p class="note">The run stopped here. A replay of this log stops here too, ` +
+        `with the same error and without calling the model.</p>`,
+    ]);
+  }
+
   const response = effect.value as ModelResponse;
   const blocks = response.content;
   const said = blocks.filter((b): b is ContentBlock & { type: "text" } => b.type === "text");

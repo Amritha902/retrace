@@ -196,6 +196,10 @@ function printEvent(io: Io, event: RetraceEvent): void {
         : "";
       const set = event.overridden ? cyan("  set") : "";
       io.out(`  ${tag} ${event.kind.padEnd(6)} ${dim(event.key)}${timing}${set}${stale}\n`);
+      if (event.failed) {
+        io.out(`        ${red("threw")} ${truncate(event.failed.message, 120)}\n`);
+        break;
+      }
       if (event.kind === "tool") {
         const v = event.value as { content?: string; isError?: boolean };
         io.out(`        ${v.isError ? red("error") : dim("→")} ${truncate(v.content ?? "", 120)}\n`);
@@ -748,7 +752,10 @@ function sameEffect(l: Effect | undefined, r: Effect | undefined): boolean {
     r !== undefined &&
     l.kind === r.kind &&
     l.key === r.key &&
-    JSON.stringify(l.value) === JSON.stringify(r.value)
+    JSON.stringify(l.value) === JSON.stringify(r.value) &&
+    // A throw is an outcome: a replay that reproduces the failure matches, and
+    // one that quietly succeeded where the log records a failure does not.
+    JSON.stringify(l.failed) === JSON.stringify(r.failed)
   );
 }
 

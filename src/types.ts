@@ -129,6 +129,20 @@ export interface StreamEvent {
   delta: StreamDelta;
 }
 
+/**
+ * An effect that threw instead of returning, reduced to what survives JSON.
+ *
+ * A log that held only the calls that worked would replay the run you most want
+ * to rewind — the one that died on a 529 — into a different, working run. So a
+ * throw is an outcome like any other: recorded where the value would have gone,
+ * and raised again in its place on a replay.
+ */
+export interface RecordedFailure {
+  /** The error's `name`, for a reader; a replay does not reconstruct the class. */
+  name: string;
+  message: string;
+}
+
 export interface Provider {
   readonly name: string;
   complete(request: ModelRequest): Promise<ModelResponse>;
@@ -241,7 +255,14 @@ export type RetraceEvent =
       kind: "model" | "tool" | "clock" | "uuid" | "random";
       /** Semantic identity of this effect. A mismatch on replay means divergence. */
       key: string;
+      /** What the effect returned, or null when it threw — see `failed`. */
       value: unknown;
+      /**
+       * Set when this effect threw rather than returning: live, or because the
+       * log it was served from records that it threw. A run stops at its first
+       * failed effect, so one of these is always the last effect in a log.
+       */
+      failed?: RecordedFailure;
       /** True when this effect was served from a parent run's log rather than executed. */
       replayed: boolean;
       /** Milliseconds the effect took to execute. Zero when replayed. */
