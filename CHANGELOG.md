@@ -130,6 +130,25 @@ publish contains rather than what changed since something.
   and a run that is its own ancestor all fail there and nowhere else. A check
   with nothing to run against comes back skipped rather than passed, and a
   lineage that leaves the store is traced as far as it goes.
+- **`rebuildRequests(events)`, behind `verify`'s `requests` check.** The one
+  check that holds a log to itself rather than to another log — which is what
+  makes the run at the top of a lineage checkable at all. Edit what a search
+  returned in the original and every other check passes: the fork replayed the
+  edited value faithfully, so `parent` holds, `lineage` traces it to the run that
+  paid, and the money still adds up. But a log holds both halves of each call —
+  the answer, and a digest of what was asked — and what was asked is the
+  conversation the earlier answers build. So the run's requests are rebuilt from
+  its own effects, the way the loop built them, and compared digest for digest:
+  a value edited, reordered or spliced in, an agent spec changed under a run
+  after the fact, a tool call holding the answer to an input the response above
+  it does not ask for, and a message event pulled apart from the effects it was
+  derived from all fail here, naming the call and the component that moved. No
+  store, no parent and no network, so it runs on a log attached to a bug report.
+  It is not an accusation: a run *served* an edited value built its requests
+  around it and verifies clean, correctly, so the edit is caught in the log where
+  it was made. A log written before runs recorded their tool declarations, or
+  before the digests existed at all, comes back skipped rather than reported as
+  edited.
 - **`compareRuns(a, b)`.** Two runs lined up effect by effect, and held to the
   stretch of them they are not free to disagree on. A run's leading replayed
   effects came out of another log at that log's own indices, so two runs that

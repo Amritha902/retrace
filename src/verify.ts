@@ -1,5 +1,12 @@
-import { orderFacets } from "./agent.ts";
+import {
+  orderFacets,
+  requestFacets,
+  requestFingerprint,
+  toolFacets,
+  toolFingerprint,
+} from "./agent.ts";
 import { formatUsd } from "./pricing.ts";
+import { rebuildRequests, recordedMessages, type RebuiltCall } from "./rebuild.ts";
 import { effectsOf } from "./replay.ts";
 import { fingerprint, RunStore } from "./store.ts";
 import { ZERO_USAGE, type ForkOrigin, type RetraceEvent, type Usage } from "./types.ts";
@@ -40,6 +47,10 @@ export interface VerifyReport {
  * invalidate everything else, and it is invisible in the fork's own log.
  *
  * `lineage` asks the question one hop up cannot answer — who actually paid.
+ *
+ * `requests` asks the one neither of them can, because both compare a log with
+ * another log: whether a log's answers are answers to its own questions. That is
+ * what makes the run at the top of a lineage checkable at all.
  */
 export function verifyRun(runId: string, store: RunStore = new RunStore()): VerifyReport {
   return verifyEvents(runId, store.read(runId), store);
@@ -59,6 +70,7 @@ export function verifyEvents(
 
   const checks = [
     checkShape(events),
+    checkRequests(events),
     checkAccounting(events),
     checkFreeReplay(events),
     checkMarkings(events, origin),
@@ -143,6 +155,129 @@ function checkShape(events: readonly RetraceEvent[]): Check {
   }
 
   return ok(name, `${events.length} events, ${effects} effects, indices dense and in order`);
+}
+
+/**
+ * Whether the log's answers are answers to the log's own questions.
+ *
+ * Everything else here checks a log against something outside it — the parent it
+ * forked from, the ancestor that paid, the totals it reported. Run those against
+ * an original run and there is nothing to compare it with, so a value edited in
+ * the log that started a lineage passes every one of them, and so does every
+ * fork that faithfully replays the edit.
+ *
+ * A log does hold enough to check itself, though, because it holds both halves.
+ * Beside each recorded answer is a digest of what was asked, and what was asked
+ * is the conversation the earlier answers build — so rebuilding the run's
+ * requests from its own effects and comparing digests says whether the two agree.
+ * Edit a tool result and the next model call is recorded against a conversation
+ * the log no longer produces; reorder two steps, splice in an effect, change the
+ * agent's prompt after the fact, and the same thing happens.
+ *
+ * This is the check the rest of them bottom out in. It needs no store, no parent
+ * and no network, which is what makes it the one that still works on the run at
+ * the top of a lineage.
+ */
+function checkRequests(events: readonly RetraceEvent[]): Check {
+  const name = "requests";
+  const rebuilt = rebuildRequests(events);
+  if (rebuilt.blocked !== undefined) return skipped(name, rebuilt.blocked);
+
+  if (rebuilt.outcomeless !== undefined) {
+    return failed(
+      name,
+      `${rebuilt.outcomeless.kind}:${rebuilt.outcomeless.key} records neither a value nor a ` +
+        `failure, so nothing in this log says how the run got past it`,
+    );
+  }
+
+  const [orphan] = rebuilt.unreached;
+  if (orphan !== undefined) {
+    return failed(name, `${orphan.kind}:${orphan.key} is in the log, and nothing in it asks for that call`);
+  }
+
+  let checked = 0;
+  let undigested = 0;
+  for (const call of rebuilt.calls) {
+    const { effect } = call;
+    // Tool calls only started carrying a digest after model calls did, and a log
+    // written before either is reported unchecked rather than guessed at.
+    if (effect.requestHash === undefined) {
+      undigested++;
+      continue;
+    }
+    const stamp = stampOf(call);
+    if (stamp.hash === effect.requestHash) {
+      checked++;
+      continue;
+    }
+    const moved = movedFacets(effect.requestFacets, stamp.facets);
+    return failed(
+      name,
+      call.kind === "model"
+        ? `model:${effect.key} was recorded against a request this log does not build` +
+          (moved.length > 0 ? ` — ${moved.join(", ")} moved` : "")
+        : `tool:${effect.key} holds the answer to a different input than the response above it asks for`,
+    );
+  }
+
+  // After the digests, because they name the call and the component that moved
+  // where these can only name a message. What they add is the last turn of a
+  // run, whose own digest was taken before it answered and so survives an edit
+  // to what it said — and any edit to the record a reader is shown rather than
+  // to the record the digests cover. `explainStale` reads these.
+  const recorded = recordedMessages(events);
+  if (recorded.length !== rebuilt.messages.length) {
+    return failed(
+      name,
+      `the log records ${plural(recorded.length, "message")} and its effects build ${rebuilt.messages.length}`,
+    );
+  }
+  for (const [i, was] of recorded.entries()) {
+    const now = rebuilt.messages[i]!;
+    if (was.step === now.step && fingerprint(was.message) === fingerprint(now.message)) continue;
+    return failed(
+      name,
+      `the ${was.message.role} message recorded at step ${was.step} is not the one this log's effects build`,
+    );
+  }
+
+  if (checked === 0) {
+    return skipped(
+      name,
+      undigested === 0
+        ? "the log records no model or tool call, so there is no request in it to rebuild"
+        : `none of its ${plural(undigested, "call")} carries a request digest: this log predates them`,
+    );
+  }
+  return ok(
+    name,
+    `${checked} calls answer the request this log rebuilds, digest for digest` +
+      (undigested > 0 ? `; ${plural(undigested, "call")} predates the digests` : ""),
+  );
+}
+
+/** What the loop would have stamped this call with, had it made it just now. */
+function stampOf(call: RebuiltCall): { hash: string; facets: Record<string, string> } {
+  return call.kind === "model"
+    ? { hash: requestFingerprint(call.request), facets: requestFacets(call.request) }
+    : { hash: toolFingerprint(call.call), facets: toolFacets(call.call) };
+}
+
+/**
+ * The components two stamps disagree on. A facet on one side and not the other
+ * counts as moved — the component is there in one request and absent from the
+ * other — and a recorded stamp with no facets at all names nothing rather than
+ * naming everything.
+ */
+function movedFacets(
+  was: Record<string, string> | undefined,
+  now: Record<string, string>,
+): string[] {
+  if (was === undefined) return [];
+  return orderFacets(
+    [...new Set([...Object.keys(was), ...Object.keys(now)])].filter((f) => was[f] !== now[f]),
+  );
 }
 
 /**

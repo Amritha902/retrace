@@ -65,6 +65,12 @@ export {
 } from "./journal.ts";
 export { loadRunModule, type RunModule } from "./module.ts";
 export { formatUsd, getRate, priceUsage, setRate, type RateCard } from "./pricing.ts";
+export {
+  rebuildRequests,
+  recordedMessages,
+  type RebuiltCall,
+  type RebuiltRequests,
+} from "./rebuild.ts";
 export { AnthropicProvider, type AnthropicProviderOptions } from "./providers/anthropic.ts";
 export {
   MockProvider,

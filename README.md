@@ -572,7 +572,7 @@ retrace fork … --set k=v      # …serving v in place of the effect recorded a
 retrace resume <run-id>       # carry on a run that stopped early, from its log
 retrace stale <run-id>        # what moved under the steps it replayed, and to what
 retrace report <run-id>       # write the run as one self-contained HTML page
-retrace verify <run-id>       # hold the log to its own claims, and to its parent
+retrace verify <run-id>       # hold the log to itself, to its own claims, and to its parent
 retrace recheck <run-id>      # …and ask the tools whether its answers still hold
 retrace export <run-id>       # the run and everything it was forked from, as one file
 retrace import <path>         # …read back into a store, so verify runs whole there
@@ -681,6 +681,7 @@ demo-forked  completed
 forked from demo-original at step 3
 
   ok   shape        24 events, 7 effects, indices dense and in order
+  ok   requests     7 calls answer the request this log rebuilds, digest for digest
   ok   accounting   $0.9200 at list price, $0.2300 billed, $0.6900 saved — the charges add up
   ok   free replay  6 of 7 effects came out of the log, and none of them was billed
   ok   markings     3 stale (system), 0 substituted, all of them served from the log
@@ -697,6 +698,45 @@ something you take on trust. The rest hold the log to its own arithmetic: the
 charges add up to the totals it reports, nothing served from the log was billed
 or claims to have taken time, and nothing that executed is marked `stale` or
 `overridden`.
+
+### The log against itself
+
+Every check named so far compares one log with another, which leaves the run at
+the top of a lineage checked by nothing. Edit what a search returned at step 0 of
+the original and `parent` still holds — the fork replayed the edited value
+faithfully — `lineage` still traces it back to the run that paid, and the money
+still adds up. A lineage that verifies, rooted in a run that never happened.
+
+A log can be held to itself, though, because it holds both halves. Beside every
+recorded answer is [a digest of what was
+asked](#what-a-replayed-step-is-still-answering), and what was asked is the
+conversation the earlier answers build — so the request can be rebuilt from the
+log and compared against the digest recorded with it. That is `requests`, and it
+is the agent loop with the provider and the tools taken out: start from the
+input, replay each recorded response into an assistant turn, turn each recorded
+tool result into the message the model saw next.
+
+```
+  fail requests     model:step:1 was recorded against a request this log does not build — conversation moved
+```
+
+Step 1 was recorded against a step 0 this log no longer contains. The same
+comparison names `system`, `model`, `tools` or `settings` when the agent spec has
+been edited under a run, `input` when a tool call holds the answer to a question
+the response above it does not ask, and reports an effect nothing in the log asks
+for when one has been spliced in. It needs no store, no parent and no network, so
+it is the check that still runs on a log attached to a bug report.
+
+What it does *not* do is decide who edited what. The fork above verifies clean
+and should: it was served that value and built its requests around it, so its log
+is a truthful record of the run it had. The edit is caught in the log where it
+was made.
+
+Two things it declines to guess at, in the usual way. A log written before runs
+recorded [their tool declarations](#storage) has no tools to rebuild a request
+from and comes back skipped rather than reporting every call as edited. So does
+one whose calls carry no digest at all; one with digests and no per-component
+facets says a request moved and not which part of it, exactly as `stale` does.
 
 `lineage` asks the question one hop up cannot answer: *who actually paid*. Fork a
 fork of a fork — the ordinary shape of this, since the whole point is to keep
@@ -1012,6 +1052,18 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   leaves the store is traced to that point and reported skipped, not passed —
   which is a fact about the store rather than about the run, and
   [`export`](#taking-a-lineage-with-you) is how you hand it the rest.
+- **One of `verify`'s checks holds a log to itself rather than to another log.**
+  `requests` rebuilds every request the run made out of the run's own effects and
+  compares it against the digest recorded beside each answer, which is what makes
+  the log at the top of a lineage checkable at all — every other check would pass
+  an edit made there, and so would every fork that faithfully replayed it. It
+  catches a value edited, reordered or spliced into a log, and an agent spec
+  changed under one after the fact. It does not catch a value that was wrong when
+  it was recorded, because a digest can only say that two requests differ; and it
+  is silent, deliberately, about logs written before the digests existed. It is
+  also not an accusation: a run that was *served* an edited value and built its
+  requests around it verifies clean, correctly, because its log is a truthful
+  record of the run it had. In code it is `rebuildRequests(events)`.
 - **`diff` checks two logs against each other, one hop at a time.** Two runs
   that both replayed a stretch of the same log cannot hold different values
   across it, and that is checkable from the two logs alone — which is what makes
@@ -1037,7 +1089,7 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 ## Status
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
-one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit, the `diff` comparison that holds two logs to the prefix they claim from the same source, and the `recheck` re-execution including its `unstable` finding, and the lineage bundles `export` and `import` move between stores — is covered by 277 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log, the `diff` comparison that holds two logs to the prefix they claim from the same source, and the `recheck` re-execution including its `unstable` finding, and the lineage bundles `export` and `import` move between stores — is covered by 306 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -1045,7 +1097,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 277 tests, no network, no API key
+npm test           # 306 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build
