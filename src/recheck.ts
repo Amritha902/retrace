@@ -181,7 +181,7 @@ function agree(a: ToolOutcome, b: ToolOutcome): boolean {
 }
 
 /** A recorded call, paired with the question the model put to it. */
-interface RecordedToolCall {
+export interface RecordedToolCall {
   step: number;
   key: string;
   call: ToolUse;
@@ -196,8 +196,12 @@ interface RecordedToolCall {
  * comes off the model response that asked for the call, matched to the effect
  * by the key the loop builds from the same two numbers. Reconstructing it the
  * loop's way, with the loop's own `toolKey`, is what stops the two drifting.
+ *
+ * Exported because `explainStale` needs the same question for a different
+ * reason — to say what a replayed call was asked that this run no longer asks —
+ * and there is only one right way to read it back out.
  */
-function recordedToolCalls(events: readonly RetraceEvent[]): RecordedToolCall[] {
+export function recordedToolCalls(events: readonly RetraceEvent[]): RecordedToolCall[] {
   const effects = effectsOf(events);
   const byKey = new Map(effects.filter((e) => e.kind === "tool").map((e) => [e.key, e]));
 

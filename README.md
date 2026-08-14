@@ -69,6 +69,47 @@ recorded with — a misconfiguration that used to look exactly like a fork worki
 correctly. The names are `model`, `system`, `tools`, `conversation` and
 `settings`, always in that order, and in code the list is `staleFacets(events)`.
 
+A digest is a one-way street, so the log can name the component and not what it
+moved to. The other side of the comparison is not lost, though: it is in the run
+this one was forked from, which is the same log the free prefix came out of.
+`retrace stale` reads both and says it:
+
+```
+$ retrace stale demo-forked
+
+demo-forked  completed
+forked from demo-original at step 3
+
+system
+  step:0, step:1, step:2
+  - You are a research analyst. Cite what you searched.
+  + You are a research analyst. Answer in at most ten words.
+
+explained: 3 stale effects, and 1 change is the whole of what moved under them
+```
+
+One change, and every effect it accounts for — a prompt rewritten once is not
+worth printing once per replayed step. It executes nothing and exits zero either
+way, because staleness is a description rather than a failure; what it can fail
+to do is *explain*, and then it says which component it could not account for
+and why. A parent that is not in this store is the common one, and
+[`export`](#taking-a-lineage-with-you) is the answer to it. In code it is
+`explainStale(runId)`.
+
+The component this earns its keep on is `tools`, because that is the one you did
+not mean to change:
+
+```
+tools
+  step:0, step:1, step:2
+  - Search the corpus for a term. Call this whenever the answer depends on a fact you were not given.
+  + (not declared)
+```
+
+The log records the tools a run declared, exactly as the model was shown them,
+so a fork reporting `stale (tools)` can now name the tool that went missing
+instead of leaving you to guess which of them the module forgot.
+
 It is a label, not an error. Replaying the steps below the one you changed is
 what forking *is*; the point is that you can now see how much of your prefix is
 answering the old question, in `show`, in the HTML report, and in the log
@@ -382,6 +423,14 @@ $ retrace fork demo-original --at 3 --set 'step:0#0:search=no results' --module 
 the one you recorded, and what moved underneath it is what it was told. That is
 the whole difference between changing the agent and changing the world, and it
 now comes out of the log rather than out of remembering which command you ran.
+`retrace stale demo-counterfactual` goes one further and names the message:
+
+```
+conversation · message 2 · user · tool_result
+  step:1, step:2
+  - 3 results for "market size"
+  + no results
+```
 
 Replacing a *model response* is the sharper version of the same move, and the
 one place a replayed tool call can stop being an answer. Hand step 0 a response
@@ -521,6 +570,7 @@ retrace fork <run-id> --at N  # replay the steps below N, then run live
 retrace fork … --at <key>     # …or re-enter mid-step, at one recorded call
 retrace fork … --set k=v      # …serving v in place of the effect recorded at k
 retrace resume <run-id>       # carry on a run that stopped early, from its log
+retrace stale <run-id>        # what moved under the steps it replayed, and to what
 retrace report <run-id>       # write the run as one self-contained HTML page
 retrace verify <run-id>       # hold the log to its own claims, and to its parent
 retrace recheck <run-id>      # …and ask the tools whether its answers still hold
@@ -837,7 +887,7 @@ It exits non-zero when something moved, so it can gate a pipeline. In code it is
 
 Runs are JSONL under `.retrace/runs/<run-id>.jsonl`, one event per line, appended synchronously. If the process dies mid-run the log is still a truthful prefix — a torn final line is dropped on read, and everything before it stands — and a truthful prefix is enough to [pick the run back up](#picking-a-run-back-up). `MemoryStore` is the same interface with nothing on disk.
 
-The log holds normalized, provider-agnostic content, plus the provider's own blocks verbatim (thinking blocks are signed and have to be echoed back byte-for-byte). A run recorded today still replays after the SDK's types change underneath it.
+The log holds normalized, provider-agnostic content, plus the provider's own blocks verbatim (thinking blocks are signed and have to be echoed back byte-for-byte). A run recorded today still replays after the SDK's types change underneath it. It also holds the tool declarations the run was recorded with, as the model was shown them — the agent spec carries the model and the prompt but never those, and without them a `stale (tools)` marking is the one staleness nothing could follow up.
 
 ## Determinism, honestly
 
@@ -878,7 +928,7 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   retries the call, because that is what resuming a broken run is for.
 - **Streaming is a view of a model call, not an effect.** Fragments never reach the log; the message they assemble into does. A replayed step reconstructs its fragments from the log, one per content block, so you get the same text back but not the same cadence.
 - **Changing `input`, the prompt or the tools on a fork with `atStep > 0` does nothing for the replayed steps** — those model calls come from the log, which was produced with the old ones. That is the point of forking, and since it is easy to forget, the log now marks each such step `stale`: replayed, and recorded against a request this run no longer builds. Fork at 0 to change what the replayed steps saw.
-- **The digest behind `stale` covers what was asked, not the world.** For a model call that is the request: model, system prompt, tools, conversation, token and thinking settings — all of it, and each of them separately, so the log names which one moved rather than only that one did. For a tool call it is the input the model supplied, under the facet `input`. A tool that returns something different today because a database moved underneath it is not something either digest can see. Nor is the list a diff: it says the system prompt changed, not what it changed to, because a digest is all the log keeps.
+- **The digest behind `stale` covers what was asked, not the world.** For a model call that is the request: model, system prompt, tools, conversation, token and thinking settings — all of it, and each of them separately, so the log names which one moved rather than only that one did. For a tool call it is the input the model supplied, under the facet `input`. A tool that returns something different today because a database moved underneath it is not something either digest can see. Nor is the list itself a diff — a digest is one-way, so one log can say the system prompt changed and never what it changed to. Two can: [`retrace stale`](#what-a-replayed-step-is-still-answering) rebuilds both requests component by component from this run's log and its parent's, and reports the difference the digests could only point at. It needs the parent in the store, and says which component it could not account for when it isn't there.
 - **A tool call's digest is a check on the question, not on the tool.** It catches the case where a replayed tool call is handed the parent's answer to a call this run does not make — which happens when a model response above it was [replaced](#what-if-it-had-said-something-else), and essentially never otherwise. It says nothing about whether the recorded result is still what the tool would return — that question needs the tool rather than the log, and [`recheck`](#checking-a-log-against-the-world) is what asks it. Tool calls recorded before this existed carry no digest and are reported clean rather than guessed at, exactly as older model calls are.
 - **A log recorded before the per-component digests still compares, and still won't guess.** Staleness is decided by the whole-request digest, which has not changed, so an older log detects it exactly as before; it simply has no components to compare, and reports `stale` with nothing named rather than naming something it did not check.
 - **`verify` checks the log against the log.** It proves that a fork's free
@@ -906,7 +956,7 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 ## Status
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
-one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests and the `stale` marking built on them, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit and the `recheck` re-execution including its `unstable` finding, and the lineage bundles `export` and `import` move between stores — is covered by 249 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit and the `recheck` re-execution including its `unstable` finding, and the lineage bundles `export` and `import` move between stores — is covered by 264 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -914,7 +964,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 249 tests, no network, no API key
+npm test           # 264 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

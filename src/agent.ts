@@ -230,6 +230,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
     budget: budgetSpec,
     input,
     provider: provider.name,
+    tools: schemas,
     ...(options.forkedFrom ? { forkedFrom: options.forkedFrom } : {}),
   });
 

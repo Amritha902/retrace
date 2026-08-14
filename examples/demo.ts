@@ -10,6 +10,7 @@
  */
 import {
   defineAgent,
+  explainStale,
   fork,
   formatUsd,
   MockProvider,
@@ -103,10 +104,19 @@ console.log(
     `${formatUsd(forked.totals.costUsd)} — saved ${formatUsd(forked.totals.savedUsd)}`,
 );
 // The prefix is free, and it is also three answers given to the old
-// instruction. Both are true, and the log says both.
+// instruction. Both are true, and the log says both. What the instruction moved
+// *to* is not in this log — a digest is all it keeps — but it is in the one this
+// run was forked from, which is the same log the free prefix came out of.
 console.log(
-  `   ${staleEffects(forked.events).length} of those replayed steps answer the prompt you replaced\n`,
+  `   ${staleEffects(forked.events).length} of those replayed steps answer the prompt you replaced`,
 );
+const moved = explainStale("demo-forked", store).changes;
+console.log(`   ${moved.map((c) => c.facet).join(", ")} moved, and nothing else:`);
+for (const change of moved) {
+  console.log(`     - ${change.before}`);
+  console.log(`     + ${change.after}`);
+}
+console.log();
 
 console.log("4. ask what the analyst would have said if the first search came back empty\n");
 searches = 0;
@@ -160,5 +170,5 @@ console.log(
 console.log(
   "\nNow try:  npx retrace show demo-forked   ·   npx retrace diff demo-original demo-forked" +
     "\n          npx retrace report demo-forked -o trace.html" +
-    "\n          npx retrace verify demo-forked",
+    "\n          npx retrace verify demo-forked   ·   npx retrace stale demo-forked",
 );

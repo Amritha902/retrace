@@ -249,6 +249,17 @@ export type RetraceEvent =
       budget: BudgetSpec;
       input: string;
       provider: string;
+      /**
+       * The tools the run declared, exactly as the model was shown them.
+       *
+       * The agent spec carries the model and the prompt but never these, which
+       * left `stale (tools)` — the marking that most often means the module you
+       * forked with is not the one the run was recorded against — the one
+       * staleness a reader could not follow up. An empty array is a run that
+       * declared no tools; absent is a log written before this was recorded, and
+       * the two mean different things to anything comparing them.
+       */
+      tools?: ToolSchema[];
       forkedFrom?: ForkOrigin;
     }
   | { seq: number; t: number; type: "step.started"; step: number }

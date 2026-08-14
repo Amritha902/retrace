@@ -3,6 +3,7 @@ import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { orderFacets } from "./agent.ts";
 import { collectBundle, importBundle, parseBundle, serializeBundle } from "./bundle.ts";
+import { explainStale } from "./explain.ts";
 import { loadRunModule, type RunModule } from "./module.ts";
 import { formatUsd } from "./pricing.ts";
 import type { Overrides } from "./journal.ts";
@@ -33,6 +34,8 @@ const USAGE = `retrace — inspect and re-run recorded agent runs
   retrace fork <run-id> --at N  replay the steps below N, then run live
                                 (--at <effect-key> re-enters mid-step instead)
   retrace resume <run-id>       carry on a run that stopped early, from its log
+  retrace stale <run-id>        say what moved under the steps it replayed, by
+                                reading the run it replayed them from
   retrace report <run-id>       write the run as one self-contained HTML page
   retrace verify <run-id>       check the log against its own claims, and what it
                                 got free against the runs that executed and paid
@@ -126,6 +129,8 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       return cmdFork(io, store, rest[0], atRaw, modulePath, overrides, onDivergence);
     case "resume":
       return cmdResume(io, store, rest[0], modulePath, overrides, onDivergence);
+    case "stale":
+      return cmdStale(io, store, rest[0]);
     case "report":
       return cmdReport(io, store, rest[0], out);
     case "verify":
@@ -541,6 +546,64 @@ async function cmdResume(
   printOverridden(io, result.events);
   printStale(io, result.events);
   return result.status === "failed" ? 1 : 0;
+}
+
+/**
+ * The other half of the `stale` marking every other command prints.
+ *
+ * `show`, `fork` and `replay` can say that a replayed step is answering an older
+ * question, and which component of it moved, because that much is in the run's
+ * own log. What it moved *to* is not — the log keeps a digest — and the answer
+ * has always been sitting in the parent, which is the same log the free prefix
+ * came out of. This reads both and says it. Nothing executes, so it is a
+ * description rather than a check, and it exits zero either way.
+ */
+function cmdStale(io: Io, store: RunStore, runId: string | undefined): number {
+  if (!runId) return fail(io, "stale needs a run id");
+
+  const summary = inspect(runId, store);
+  const report = explainStale(runId, store);
+
+  io.out(`${bold(runId)}  ${statusLabel(summary.status)}\n`);
+  if (summary.forkedFrom) io.out(dim(`${origin(summary.forkedFrom)}\n`));
+  io.out("\n");
+
+  if (report.staleEffects === 0) {
+    io.out(
+      `${green("nothing stale")}${dim(
+        ": every effect this run served from the log was recorded against the request it builds\n",
+      )}`,
+    );
+    return 0;
+  }
+
+  for (const change of report.changes) {
+    io.out(`${bold(change.facet)}${change.where ? dim(` · ${change.where}`) : ""}\n`);
+    io.out(`  ${dim(change.keys.join(", "))}\n`);
+    io.out(`  ${red(`- ${truncate(change.before, 160)}`)}\n`);
+    io.out(`  ${green(`+ ${truncate(change.after, 160)}`)}\n\n`);
+  }
+  for (const gap of report.unexplained) {
+    io.out(`${bold(gap.facet)}\n`);
+    io.out(`  ${dim(gap.keys.join(", "))}\n`);
+    io.out(`  ${yellow(`? ${gap.why}`)}\n\n`);
+  }
+
+  const effects = plural(report.staleEffects, "stale effect");
+  if (report.complete) {
+    io.out(
+      `${green("explained")}: ${effects}, and ${plural(report.changes.length, "change")} ` +
+        `${report.changes.length === 1 ? "is" : "are"} the whole of what moved under ` +
+        `${report.staleEffects === 1 ? "it" : "them"}\n`,
+    );
+    return 0;
+  }
+  io.out(
+    `${yellow("explained as far as the logs go")}: ${effects}, ` +
+      `${plural(report.changes.length, "change")} named and ` +
+      `${plural(report.unexplained.length, "component")} the logs cannot account for\n`,
+  );
+  return 0;
 }
 
 /**

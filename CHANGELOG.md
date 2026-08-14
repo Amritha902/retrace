@@ -82,6 +82,20 @@ publish contains rather than what changed since something.
   HTML report. Staleness itself is still decided by the whole-request digest, so
   a log written before this compares exactly as it did and reports `stale` with
   nothing named rather than naming something it never checked.
+- **…and what it moved to.** A digest is one-way, so a single log can say the
+  system prompt changed and never what it changed to. Two logs can:
+  `explainStale(runId)`, and `retrace stale <run-id>`, rebuild the request
+  component by component from this run's log and the parent's and report the
+  difference — the two prompts, the tool that went missing, the message an
+  override replaced, the question a replayed tool call was asked instead. One
+  change is reported once, with every effect it accounts for, so a prompt
+  rewritten at step 12 does not print twelve times. It executes nothing and
+  exits zero either way, since staleness is a description rather than a failure;
+  what it reports instead is which component it could *not* account for and why
+  — a parent that is not in this store, or a log written before the digests
+  existed. `run.started` now records the tool declarations a run was made with,
+  as the model was shown them, without which `stale (tools)` was the one
+  staleness nothing could follow up.
 - **Tool calls carry a digest too,** of the input they were called with, under
   the facet `input`. A tool's input normally comes out of a model response that
   itself came out of the log, so in an ordinary fork there is nothing to see —
@@ -161,13 +175,15 @@ publish contains rather than what changed since something.
 
 ### The CLI
 
-`retrace ls`, `show`, `cost`, `diff`, `replay`, `fork`, `resume`, `report`,
-`verify`, `recheck`, `export` and `import`.
+`retrace ls`, `show`, `cost`, `diff`, `replay`, `fork`, `resume`, `stale`,
+`report`, `verify`, `recheck`, `export` and `import`.
 `replay` needs nothing but the log and exits non-zero if the run failed to
 reproduce, so it works as a regression check on the loop. `fork --module <path>`
 and `resume --module <path>` supply the half a log cannot hold — the tools, the
 provider, and any agent overrides.
 `--set <effect-key>=<value>`, on `fork` and `replay`, is the counterfactual.
+`stale <run-id>` reads the run against the one it replayed from and prints both
+sides of everything that moved under its free prefix.
 `report` writes the run as one self-contained HTML page: no JavaScript, no
 network, readable in a light or a dark browser. `verify` prints one line per
 check and exits non-zero on a failure, so it can gate a pipeline. `recheck
@@ -191,7 +207,7 @@ depend on.
 
 ### Verified by
 
-249 tests that run with no network and no API key, plus two `[live]` integration
+264 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:

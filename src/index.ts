@@ -31,6 +31,14 @@ export {
   ToolNotFoundError,
 } from "./errors.ts";
 export {
+  explainStale,
+  explainStaleEvents,
+  EXPLAINED_FACETS,
+  type StaleChange,
+  type StaleReport,
+  type UnexplainedStaleness,
+} from "./explain.ts";
+export {
   applyOverrides,
   describeFailure,
   DETERMINISTIC_KINDS,
@@ -79,10 +87,12 @@ export {
   executed,
   recheckEvents,
   recheckRun,
+  recordedToolCalls,
   type RecheckOptions,
   type RecheckReport,
   type RecheckStatus,
   type RecheckedCall,
+  type RecordedToolCall,
   type ToolOutcome,
 } from "./recheck.ts";
 export { renderReport } from "./report.ts";
