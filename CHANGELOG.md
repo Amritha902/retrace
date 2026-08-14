@@ -93,6 +93,18 @@ publish contains rather than what changed since something.
   and a run that is its own ancestor all fail there and nowhere else. A check
   with nothing to run against comes back skipped rather than passed, and a
   lineage that leaves the store is traced as far as it goes.
+- **`recheckRun(runId, { tools })`.** The other half of `verify`, and the only
+  thing here that reaches the world on purpose: it puts each recorded tool call
+  back to the tool as it is today — with the input the model supplied at the
+  time, read off the model response that asked for it — and compares the answer
+  to what the log holds. `verify` can prove a fork's free prefix is its parent's;
+  only this can say the prefix is still *true*, which is what makes it worth
+  replaying. The model is never called. Calls are handed the clock, ids and
+  randomness the log recorded at the same slots, so a tool that reads those from
+  `ctx` is compared on what it said rather than on when. A call naming a tool the
+  module no longer exports, one narrowed out by `only`, and one holding a value
+  an override substituted are each counted apart rather than folded into a pass —
+  the report is `ok` when nothing moved and `complete` only when everything ran.
 - **A substituted value is marked on the run that was told to substitute it,**
   and not on its descendants. A fork of a counterfactual inherits the value like
   any other recorded value; the `overridden` mark stays in the log where the
@@ -100,8 +112,8 @@ publish contains rather than what changed since something.
 
 ### The CLI
 
-`retrace ls`, `show`, `cost`, `diff`, `replay`, `fork`, `resume`, `report` and
-`verify`.
+`retrace ls`, `show`, `cost`, `diff`, `replay`, `fork`, `resume`, `report`,
+`verify` and `recheck`.
 `replay` needs nothing but the log and exits non-zero if the run failed to
 reproduce, so it works as a regression check on the loop. `fork --module <path>`
 and `resume --module <path>` supply the half a log cannot hold — the tools, the
@@ -109,7 +121,10 @@ provider, and any agent overrides.
 `--set <effect-key>=<value>`, on `fork` and `replay`, is the counterfactual.
 `report` writes the run as one self-contained HTML page: no JavaScript, no
 network, readable in a light or a dark browser. `verify` prints one line per
-check and exits non-zero on a failure, so it can gate a pipeline.
+check and exits non-zero on a failure, so it can gate a pipeline. `recheck
+--module <path>` does the same for the tools, printing both answers where one
+has moved; `--tool <name>` is repeatable and keeps it away from the tools that
+should not run twice.
 
 ### Storage and providers
 
@@ -124,7 +139,7 @@ depend on.
 
 ### Verified by
 
-185 tests that run with no network and no API key, plus two `[live]` integration
+202 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:

@@ -15,6 +15,7 @@ import {
   staleEffects,
   summarize,
 } from "./replay.ts";
+import { recheckRun, type RecheckReport, type RecheckStatus } from "./recheck.ts";
 import { renderReport } from "./report.ts";
 import { DEFAULT_STORE_DIR, RunStore } from "./store.ts";
 import { verifyRun } from "./verify.ts";
@@ -32,6 +33,8 @@ const USAGE = `retrace — inspect and re-run recorded agent runs
   retrace report <run-id>       write the run as one self-contained HTML page
   retrace verify <run-id>       check the log against its own claims, and what it
                                 got free against the runs that executed and paid
+  retrace recheck <run-id>      ask the tools whether the log's answers still
+                                hold — re-executes every recorded tool call
 
 Options
   --dir <path>              store directory (default: ${DEFAULT_STORE_DIR})
@@ -47,6 +50,9 @@ Options
                             found". Repeatable; the key must be below --at.
   --on-divergence <policy>  strict (default) stops when the log disagrees with
                             the loop; live executes from that point instead
+  --tool <name>             limit recheck to this tool. Repeatable. Everything
+                            it runs, it runs for real — this is how you keep it
+                            away from a tool that writes something
 `;
 
 const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
@@ -88,6 +94,7 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
   const out = takeOption(args, "-o") ?? takeOption(args, "--out");
   const overrides = readOverrides(takeEvery(args, "--set"));
   const onDivergence = readPolicy(takeOption(args, "--on-divergence"));
+  const only = takeEvery(args, "--tool");
 
   const [command, ...rest] = args;
   const store = new RunStore(dir);
@@ -111,6 +118,8 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       return cmdReport(io, store, rest[0], out);
     case "verify":
       return cmdVerify(io, store, rest[0]);
+    case "recheck":
+      return cmdRecheck(io, store, rest[0], modulePath, only);
     case undefined:
     case "-h":
     case "--help":
@@ -581,6 +590,116 @@ function cmdVerify(io: Io, store: RunStore, runId: string | undefined): number {
       `${short} check${short === 1 ? "" : "s"} had nothing to run against\n`,
   );
   return 0;
+}
+
+/**
+ * The other half of `verify`. That one holds a log to itself and never executes;
+ * this one executes and holds it to the world, which is the only way to find out
+ * whether a prefix worth replaying is still a prefix worth believing.
+ */
+async function cmdRecheck(
+  io: Io,
+  store: RunStore,
+  runId: string | undefined,
+  modulePath: string | undefined,
+  only: readonly string[],
+): Promise<number> {
+  if (!runId) return fail(io, "recheck needs a run id");
+  if (modulePath === undefined) {
+    return fail(io, "recheck needs --module <path>: it has to execute the tools to compare them");
+  }
+
+  const summary = inspect(runId, store);
+  const mod = await loadRunModule(modulePath);
+  const report = await recheckRun(runId, {
+    tools: mod.tools ?? [],
+    store,
+    ...(only.length > 0 ? { only } : {}),
+  });
+
+  const total = report.calls.length;
+  io.out(`${bold(runId)}  ${statusLabel(summary.status)}\n`);
+  io.out(
+    dim(
+      `${summary.agent.name} · ${summary.agent.model} · ` +
+        `${total} recorded tool call${total === 1 ? "" : "s"}\n\n`,
+    ),
+  );
+
+  if (total === 0) {
+    io.out(dim("this run records no tool calls, so there is nothing to ask again\n"));
+    return 0;
+  }
+
+  const width = Math.max(...report.calls.map((c) => c.key.length));
+  for (const call of report.calls) {
+    const label = RECHECK_LABELS[call.status].padEnd(MARK_WIDTH);
+    const mark =
+      call.status === "same" ? green(label) : call.status === "moved" ? red(label) : dim(label);
+    io.out(`  ${mark} ${call.key.padEnd(width)}  ${dim(truncate(JSON.stringify(call.input), 60))}\n`);
+    if (call.status === "moved" && call.now) {
+      // Under the input column: the question, then the two answers to it.
+      const indent = " ".repeat(width + MARK_WIDTH + 5);
+      io.out(`${indent}${dim("was")}  ${truncate(call.recorded.content, 90)}\n`);
+      io.out(`${indent}${dim("now")}  ${cyan(truncate(call.now.content, 90))}\n`);
+    }
+  }
+
+  const moved = report.calls.filter((c) => c.status === "moved").length;
+  const ran = report.calls.filter((c) => c.status === "same" || c.status === "moved").length;
+  io.out("\n");
+
+  if (moved > 0) {
+    io.out(
+      `${red("moved")}: ${moved} of ${ran} re-executed tool call${ran === 1 ? "" : "s"} no longer ` +
+        `return${moved === 1 ? "s" : ""} what the log holds — a fork off this run replays an ` +
+        `answer the world has since changed\n`,
+    );
+    return 1;
+  }
+  if (report.complete) {
+    io.out(
+      `${green("still true")}: all ${ran} recorded tool call${ran === 1 ? "" : "s"} ` +
+        `${ran === 1 ? "returns" : "return"} what the log holds\n`,
+    );
+    return 0;
+  }
+  io.out(
+    `${yellow("still true as far as it goes")}: ${ran} of ${total} recorded tool calls ` +
+      `re-executed and agreed; ${describeUnrun(report)}\n`,
+  );
+  return 0;
+}
+
+/**
+ * What each outcome is called in the timeline. `set` is deliberately the word
+ * the report and `show` already use for a substituted value, since it is the
+ * same fact arriving from a different direction.
+ */
+const RECHECK_LABELS: Record<RecheckStatus, string> = {
+  same: "same",
+  moved: "moved",
+  substituted: "set",
+  missing: "no tool",
+  skipped: "skipped",
+};
+
+const MARK_WIDTH = Math.max(...Object.values(RECHECK_LABELS).map((l) => l.length));
+
+/** Why the calls that were not executed were not executed, counted by reason. */
+function describeUnrun(report: RecheckReport): string {
+  const reasons: Array<[RecheckStatus, string]> = [
+    ["missing", "name a tool the module does not export"],
+    ["skipped", "were not asked for"],
+    ["substituted", "hold a value that was substituted rather than returned"],
+  ];
+  return reasons
+    .map(([status, why]): string => {
+      const n = report.calls.filter((c) => c.status === status).length;
+      return n === 0 ? "" : `${n} ${why}`;
+    })
+    .filter((s) => s !== "")
+    .join(", ");
 }
 
 /** Where a re-entered run came from, in the words of the command that made it. */

@@ -420,6 +420,7 @@ retrace fork … --set k=v      # …serving v in place of the effect recorded a
 retrace resume <run-id>       # carry on a run that stopped early, from its log
 retrace report <run-id>       # write the run as one self-contained HTML page
 retrace verify <run-id>       # hold the log to its own claims, and to its parent
+retrace recheck <run-id>      # …and ask the tools whether its answers still hold
 ```
 
 `diff` is the one to reach for after a fork — it shows exactly which effect the two runs stopped sharing.
@@ -568,6 +569,70 @@ totals yet — comes back skipped rather than passed, traced as far as it goes, 
 the last line says how much of the verification that leaves undone. In code it is
 `verifyRun(runId)`.
 
+### Checking a log against the world
+
+`verify` executes nothing, which is what makes it portable and also what bounds
+it. It can prove a fork's free prefix is the prefix its parent recorded. It
+cannot tell you that prefix is still *true* — a search recorded last month is
+replayed today as though the corpus had not moved underneath it, and no amount
+of reading the log will show that, because the thing that changed is not in the
+log.
+
+`recheck` is the half that executes. It takes each tool call the log records,
+puts the question the model asked at the time back to the tool as it is today,
+and compares the answers:
+
+```bash
+retrace recheck demo-forked --module ./agent-module.ts
+```
+
+```
+demo-forked  completed
+analyst · claude-opus-5 · 3 recorded tool calls
+
+  same    step:0#0:search  {"query":"market size"}
+  same    step:1#0:search  {"query":"competitors"}
+  moved   step:2#0:search  {"query":"pricing"}
+                           was  3 results for "pricing"
+                           now  5 results for "pricing"
+
+moved: 1 of 3 re-executed tool calls no longer returns what the log holds — a
+fork off this run replays an answer the world has since changed
+```
+
+That last line is the whole point of the command. Everything else here works to
+make a replayed prefix free; this is the one thing that says whether a free
+prefix is still worth having.
+
+The model is never called — the questions are already in the log, and asking it
+again would just be a second run. And what gets asked is exactly what was asked:
+a tool's own effect holds only a digest of its input, so the input itself is read
+back off the model response that requested the call, keyed the way the loop keyed
+it. Each call is also handed the clock, ids and randomness the run recorded at
+the same slots, so a tool that stamps `now()` into its answer is compared on what
+it said rather than on when it was asked.
+
+Three outcomes are not comparisons, and are counted apart rather than folded into
+a pass. A call naming a tool the module does not export is `no tool`. A call you
+kept `--tool` away from is `skipped`. A value an
+[override](#what-if-it-had-said-something-else) substituted is `set` — no tool
+ever produced it, so a tool disagreeing with it is the tool being right. The
+report is `ok` when nothing moved and `complete` only when everything actually
+ran, and the closing line reports the difference rather than calling a run
+checked that wasn't:
+
+```
+still true as far as it goes: 2 of 3 recorded tool calls re-executed and agreed;
+1 names a tool the module does not export
+```
+
+**It executes your tools, for real.** That is the point, and it is the same
+hazard as forking past a `send_email`, arriving at the moment you are auditing
+rather than running. `--tool <name>` is repeatable and limits execution to the
+tools you name, which is how you re-check the reads and leave the writes alone.
+It exits non-zero when something moved, so it can gate a pipeline. In code it is
+`recheckRun(runId, { tools })`.
+
 ## Storage
 
 Runs are JSONL under `.retrace/runs/<run-id>.jsonl`, one event per line, appended synchronously. If the process dies mid-run the log is still a truthful prefix — a torn final line is dropped on read, and everything before it stands — and a truthful prefix is enough to [pick the run back up](#picking-a-run-back-up). `MemoryStore` is the same interface with nothing on disk.
@@ -586,21 +651,29 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 - **Streaming is a view of a model call, not an effect.** Fragments never reach the log; the message they assemble into does. A replayed step reconstructs its fragments from the log, one per content block, so you get the same text back but not the same cadence.
 - **Changing `input`, the prompt or the tools on a fork with `atStep > 0` does nothing for the replayed steps** — those model calls come from the log, which was produced with the old ones. That is the point of forking, and since it is easy to forget, the log now marks each such step `stale`: replayed, and recorded against a request this run no longer builds. Fork at 0 to change what the replayed steps saw.
 - **The digest behind `stale` covers what was asked, not the world.** For a model call that is the request: model, system prompt, tools, conversation, token and thinking settings — all of it, and each of them separately, so the log names which one moved rather than only that one did. For a tool call it is the input the model supplied, under the facet `input`. A tool that returns something different today because a database moved underneath it is not something either digest can see. Nor is the list a diff: it says the system prompt changed, not what it changed to, because a digest is all the log keeps.
-- **A tool call's digest is a check on the question, not on the tool.** It catches the case where a replayed tool call is handed the parent's answer to a call this run does not make — which happens when a model response above it was [replaced](#what-if-it-had-said-something-else), and essentially never otherwise. It says nothing about whether the recorded result is still what the tool would return. Tool calls recorded before this existed carry no digest and are reported clean rather than guessed at, exactly as older model calls are.
+- **A tool call's digest is a check on the question, not on the tool.** It catches the case where a replayed tool call is handed the parent's answer to a call this run does not make — which happens when a model response above it was [replaced](#what-if-it-had-said-something-else), and essentially never otherwise. It says nothing about whether the recorded result is still what the tool would return — that question needs the tool rather than the log, and [`recheck`](#checking-a-log-against-the-world) is what asks it. Tool calls recorded before this existed carry no digest and are reported clean rather than guessed at, exactly as older model calls are.
 - **A log recorded before the per-component digests still compares, and still won't guess.** Staleness is decided by the whole-request digest, which has not changed, so an older log detects it exactly as before; it simply has no components to compare, and reports `stale` with nothing named rather than naming something it did not check.
 - **`verify` checks the log against the log.** It proves that a fork's free
   prefix is the prefix its parent recorded, that following the chain up leads to
   a run that executed and was billed for it, and that the money adds up to the
   savings claimed. It cannot tell you the recorded values were the right
   answers, or that a tool asked the same question today would still say the same
-  thing — nothing that reads only a log can. And it can only follow a lineage as
-  far as the logs it has: a chain that leaves the store is traced to that point
-  and reported skipped, not passed.
+  thing — nothing that reads only a log can. `recheck` executes the tools and
+  answers the second of those; the first is not a question anything here settles.
+  And `verify` can only follow a lineage as far as the logs it has: a chain that
+  leaves the store is traced to that point and reported skipped, not passed.
+- **`recheck` executes your tools, on purpose.** It is the one command here that
+  reaches the world by design, so a recorded `send_email` is sent again unless
+  `--tool` keeps it out of the run. It hands each call the clock, ids and
+  randomness the log recorded at the same slots, so a tool that takes those from
+  `ctx` is compared on what it said rather than on when it was asked — but a tool
+  reading `Date.now()` directly will look like it has moved, for the same reason
+  it would replay differently.
 - **An override is a counterfactual for the steps above it and nothing else.** Replacing a value changes what the live steps see; the replayed steps between it and the fork point still come out of the log as recorded, and are marked `stale` for it — the model calls on `conversation`, and any tool call whose input the substitution moved on `input`. The fork's log is a truthful record of a run that answered a question its parent never asked — it is not a record of what the parent would have done, because nothing re-ran to find out.
 
 ## Status
 
-Early, and not yet on npm. The core — journal, agent loop, fork, replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests and the `stale` marking built on them, value overrides, the HTML report, streaming, parallel tool calls, and the `verify` audit — is covered by 185 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+Early, and not yet on npm. The core — journal, agent loop, fork, replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests and the `stale` marking built on them, value overrides, the HTML report, streaming, parallel tool calls, the `verify` audit and the `recheck` re-execution — is covered by 202 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -608,7 +681,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 185 tests, no network, no API key
+npm test           # 202 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

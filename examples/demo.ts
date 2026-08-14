@@ -15,6 +15,7 @@ import {
   MockProvider,
   objectSchema,
   overriddenEffects,
+  recheckRun,
   replay,
   run,
   RunStore,
@@ -137,6 +138,20 @@ for (const check of verifyRun("demo-forked", store).checks) {
   console.log(`   ${check.status.padEnd(6)} ${check.name.padEnd(12)} ${check.detail}`);
 }
 console.log();
+
+console.log("6. …and the answers it replayed for free are still the answers\n");
+// Step 5 held the log to the log. This holds it to the world: the three
+// searches the fork got for nothing are put to the tool again, with the
+// queries the model asked at the time, and compared to what the log holds.
+searches = 0;
+const rechecked = await recheckRun("demo-forked", { tools: [search], store });
+for (const call of rechecked.calls) {
+  console.log(`   ${call.status.padEnd(6)} ${call.key.padEnd(16)} ${call.recorded.content}`);
+}
+console.log(
+  `\n   ${searches} searches re-executed; the free prefix is still true, so it is still ` +
+    `worth having\n`,
+);
 
 const saving = 1 - forked.totals.billedUsd / original.totals.billedUsd;
 console.log(

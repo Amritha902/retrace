@@ -60,6 +60,15 @@ export {
   type ResumeOptions,
   type RunSummary,
 } from "./replay.ts";
+export {
+  recheckEvents,
+  recheckRun,
+  type RecheckOptions,
+  type RecheckReport,
+  type RecheckStatus,
+  type RecheckedCall,
+  type ToolOutcome,
+} from "./recheck.ts";
 export { renderReport } from "./report.ts";
 export { DEFAULT_STORE_DIR, MemoryStore, RunStore, fingerprint, newRunId } from "./store.ts";
 export { objectSchema, tool, type ToolDefinition } from "./tools.ts";

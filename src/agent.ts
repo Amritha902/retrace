@@ -553,7 +553,12 @@ function replayedReads(outcome: EffectOutcome<ToolResult>): RecordedRead[] {
   }));
 }
 
-function toolKey(step: number, ordinal: number, name: string): string {
+/**
+ * Where a tool call lands in the log. Exported because anything that reads a
+ * recorded call back — `recheck` — has to name it the way the loop named it,
+ * and deriving the format twice is how the two come to disagree.
+ */
+export function toolKey(step: number, ordinal: number, name: string): string {
   return `step:${step}#${ordinal}:${name}`;
 }
 
@@ -562,7 +567,7 @@ function toolKey(step: number, ordinal: number, name: string): string {
  * failing or missing tool is information for the model, not a crash for the
  * run — hand the error back and let it recover.
  */
-async function invoke(
+export async function invoke(
   tools: ReadonlyMap<string, Tool>,
   call: ToolUse,
   context: ToolContext,
@@ -656,6 +661,18 @@ function detachedContext(
     return value;
   };
   return toolContext(step, ownerKey, take);
+}
+
+/**
+ * A tool context for re-executing a recorded call outside a run.
+ *
+ * Reads resolve to whatever the log holds at the same slots, and a slot the log
+ * never filled reads the world. `recheck` needs this so that a tool which
+ * stamps `now()` into what it returns is compared on what it said rather than
+ * on when it was asked.
+ */
+export function recordedContext(journal: Journal, step: number, ownerKey: string): ToolContext {
+  return detachedContext(journal, step, ownerKey, []);
 }
 
 /** An assembled turn, cut back into the fragments a stream would have produced. */
