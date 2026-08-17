@@ -385,3 +385,28 @@ test("report says what it needs when it is given no run", async (t) => {
   assert.equal(await main(["report", "nonesuch", "--dir", dir], nonesuch), 1);
   assert.match(nonesuch.errors(), /no run "nonesuch"/);
 });
+
+test("a tool that read a clock outside the journal is badged for it", async (t) => {
+  const dir = tempDir(t);
+  const stamp = tool({
+    name: "stamp",
+    description: "File a record. Call this to record that something happened.",
+    inputSchema: objectSchema({}),
+    run: () => `filed at ${Date.now()}`,
+  });
+  const result = await run("file it", {
+    agent,
+    provider: new MockProvider([
+      { content: [toolUse("t1", "stamp", {})] },
+      { content: [text("filed")] },
+    ]),
+    tools: [stamp],
+    store: new RunStore(dir),
+    runId: "snapshot",
+  });
+
+  const html = render(result.events, "snapshot");
+
+  assert.match(html, /<span class="badge ambient"[^>]*>reads clock<\/span>/);
+  assert.match(html, /\.badge\.ambient\{/, "the badge needs a colour, in both themes");
+});

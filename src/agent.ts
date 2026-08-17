@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { realNow, realRandom, watchAmbient, type AmbientSource } from "./ambient.ts";
 import { Budget } from "./budget.ts";
 import { BudgetExceededError, IrreversibleToolError, ToolNotFoundError } from "./errors.ts";
 import {
@@ -360,6 +361,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
         outcome: EffectOutcome<ToolResult>,
         durationMs: number,
         reads: readonly RecordedRead[],
+        ambient: readonly AmbientSource[],
       ): void => {
         emit({
           type: "effect",
@@ -377,6 +379,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
             ? { staleFacets: orderFacets(outcome.staleFacets) }
             : {}),
           ...(outcome.overridden ? { overridden: true } : {}),
+          ...(ambient.length > 0 ? { ambient: [...ambient] } : {}),
         });
         // After the tool's own event, so the log shows the container before its
         // contents.
@@ -400,10 +403,15 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
         const journaled: RecordedRead[] = [];
         const context = journaledContext(journal, step, key, journaled);
         const stamp = toolStamp(call);
+        let ambient: readonly AmbientSource[] = [];
         const outcome = await journal.effect<ToolResult>(
           "tool",
           key,
-          () => invoke(toolsByName, call, context),
+          async () => {
+            const watched = await watchAmbient(() => invoke(toolsByName, call, context));
+            ambient = watched.ambient;
+            return watched.value;
+          },
           stamp,
         );
 
@@ -416,6 +424,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
           // copied straight back out, because a replay is supposed to reproduce
           // the log rather than a shorter version of it.
           outcome.replayed ? replayedReads(outcome) : journaled,
+          outcome.replayed ? outcome.ambient : ambient,
         );
         results.push(toolResult(call, outcome.value));
       };
@@ -436,9 +445,15 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
             const key = toolKey(step, from + i, call.name);
             const reads: DetachedRead[] = [];
             const context = detachedContext(journal, step, key, reads);
-            const startedAt = Date.now();
-            const value = await invoke(toolsByName, call, context);
-            return { key, value, reads, durationMs: Date.now() - startedAt };
+            const startedAt = realNow();
+            const watched = await watchAmbient(() => invoke(toolsByName, call, context));
+            return {
+              key,
+              value: watched.value,
+              ambient: watched.ambient,
+              reads,
+              durationMs: realNow() - startedAt,
+            };
           }),
         );
 
@@ -456,7 +471,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
             const committed = await journal.deterministic(read.kind, read.key, () => read.value);
             journaled.push({ kind: read.kind, key: read.key, ...committed });
           }
-          emitToolCall(done.key, stamp, outcome, done.durationMs, journaled);
+          emitToolCall(done.key, stamp, outcome, done.durationMs, journaled, done.ambient);
           results.push(toolResult(call, outcome.value));
         }
       };
@@ -660,9 +675,11 @@ function toolContext(step: number, ownerKey: string, take: Take): ToolContext {
 
   return {
     step,
-    now: () => at("clock", () => Date.now()),
+    // The unwatched clock and RNG: a read the journal covers is the opposite of
+    // the thing `watchAmbient` is looking for, and must not look like one.
+    now: () => at("clock", realNow),
     uuid: () => at("uuid", () => randomUUID()),
-    random: () => at("random", () => Math.random()),
+    random: () => at("random", realRandom),
   };
 }
 

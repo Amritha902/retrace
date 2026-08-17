@@ -4,6 +4,8 @@
  * replayed.
  */
 
+import type { AmbientSource } from "./ambient.ts";
+
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface Usage {
@@ -334,6 +336,17 @@ export type RetraceEvent =
        * and says that it was not what the parent recorded.
        */
       overridden?: true;
+      /**
+       * The nondeterministic sources this tool call reached for without going
+       * through the journal — `Date.now()`, `Math.random()`, `crypto.randomUUID()`
+       * — watched while the tool body ran.
+       *
+       * Present only when there was something to say, so a call that took its
+       * time and ids from `ctx` looks exactly like one that needed neither. What
+       * it marks is a recorded answer that is a snapshot rather than something a
+       * replay can reproduce: the tool would not give it again.
+       */
+      ambient?: AmbientSource[];
     }
   | { seq: number; t: number; type: "charge"; step: number; usage: Usage; costUsd: number; billedUsd: number }
   | { seq: number; t: number; type: "message"; step: number; message: Message }

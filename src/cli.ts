@@ -9,6 +9,7 @@ import { loadRunModule, type RunModule } from "./module.ts";
 import { formatUsd } from "./pricing.ts";
 import type { Overrides } from "./journal.ts";
 import {
+  ambientEffects,
   effectsOf,
   fork,
   inspect,
@@ -227,7 +228,8 @@ function printEvent(io: Io, event: RetraceEvent): void {
         ? yellow(`  stale${moved.length > 0 ? ` (${moved.join(", ")})` : ""}`)
         : "";
       const set = event.overridden ? cyan("  set") : "";
-      io.out(`  ${tag} ${event.kind.padEnd(6)} ${dim(event.key)}${timing}${set}${stale}\n`);
+      const read = event.ambient?.length ? red(`  reads ${event.ambient.join(", ")}`) : "";
+      io.out(`  ${tag} ${event.kind.padEnd(6)} ${dim(event.key)}${timing}${set}${stale}${read}\n`);
       if (event.failed) {
         io.out(`        ${red("threw")} ${truncate(event.failed.message, 120)}\n`);
         break;
@@ -452,6 +454,7 @@ async function cmdReplay(
   if (Object.keys(overrides).length > 0) {
     printOverridden(io, result.events);
     printStale(io, result.events);
+    printAmbient(io, result.events);
     return 0;
   }
 
@@ -478,6 +481,7 @@ async function cmdReplay(
       `${formatUsd(result.totals.savedUsd)} not spent\n`,
   );
   printStale(io, result.events);
+  printAmbient(io, result.events);
   return 0;
 }
 
@@ -511,6 +515,28 @@ function printStale(io: Io, events: readonly RetraceEvent[]): void {
         dim(moved.length > 0 ? ` — ${moved.join(", ")} changed\n` : "\n"),
     );
   }
+}
+
+/**
+ * The tool calls in this run that took a time, an id or a random draw from
+ * somewhere the journal cannot follow.
+ *
+ * The other two lines describe a prefix that is answering an older question;
+ * this one describes a prefix that is not an answer at all, because the tool
+ * would not say it again. It is printed after them for that reason — it is the
+ * one of the three that is a problem rather than a consequence.
+ */
+function printAmbient(io: Io, events: readonly RetraceEvent[]): void {
+  const reached = ambientEffects(events);
+  if (reached.length === 0) return;
+  const sources = [...new Set(reached.flatMap((e) => e.ambient ?? []))];
+  io.out(
+    red(`${reached.length} tool call${reached.length === 1 ? "" : "s"} read the `) +
+      red(`${sources.join(" and ")} outside the journal`) +
+      dim(`: ${reached.map((e) => e.key).join(", ")}\n`) +
+      dim(`  what the log holds for ${reached.length === 1 ? "it" : "them"} is a snapshot, `) +
+      dim(`not something a replay reproduces — take these from ctx instead\n`),
+  );
 }
 
 /** What the counterfactual actually replaced, once the run has been through it. */
@@ -579,6 +605,7 @@ async function cmdFork(
   }
   printOverridden(io, result.events);
   printStale(io, result.events);
+  printAmbient(io, result.events);
   return result.status === "failed" ? 1 : 0;
 }
 
@@ -654,6 +681,7 @@ async function cmdResume(
 
   printOverridden(io, result.events);
   printStale(io, result.events);
+  printAmbient(io, result.events);
   return result.status === "failed" ? 1 : 0;
 }
 

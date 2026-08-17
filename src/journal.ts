@@ -1,3 +1,4 @@
+import { realNow, type AmbientSource } from "./ambient.ts";
 import { DivergenceError, ReplayedFailure } from "./errors.ts";
 import type { RecordedFailure } from "./types.ts";
 
@@ -29,6 +30,8 @@ export interface JournalEntry {
   stamp?: Stamp;
   /** Set when this value was substituted for the recorded one. See `applyOverrides`. */
   overridden?: true;
+  /** What the recorded call read outside the journal, if anything. */
+  ambient?: readonly AmbientSource[];
 }
 
 export interface EffectOutcome<T> {
@@ -57,6 +60,12 @@ export interface EffectOutcome<T> {
    * one recorded there — the caller asked "what if this had been different".
    */
   overridden: boolean;
+  /**
+   * What the recorded call read outside the journal. Only ever populated on a
+   * replayed effect: a live one's reads are watched by the caller running the
+   * body, not by the journal serving it.
+   */
+  ambient: readonly AmbientSource[];
   durationMs: number;
   /**
    * Effects recorded inside this one. Populated when a replay serves an effect
@@ -169,6 +178,7 @@ export class Journal {
           stale,
           staleFacets: stale ? movedFacets(entry.stamp, stamp) : [],
           overridden: entry.overridden === true,
+          ambient: entry.ambient ?? [],
           durationMs: 0,
           nested: this.takeNested(key),
           ...(entry.failed === undefined
@@ -188,7 +198,7 @@ export class Journal {
       this.cursor = this.recorded.length;
     }
 
-    const startedAt = Date.now();
+    const startedAt = realNow();
     const settled: { value?: T; thrown?: unknown; failed?: RecordedFailure } = {};
     try {
       settled.value = await execute();
@@ -207,7 +217,8 @@ export class Journal {
       stale: false,
       staleFacets: [],
       overridden: false,
-      durationMs: Date.now() - startedAt,
+      ambient: [],
+      durationMs: realNow() - startedAt,
       nested: [],
       ...(settled.failed === undefined
         ? {}
@@ -241,12 +252,13 @@ export class Journal {
         stale: false,
         staleFacets: [],
         overridden: recorded.overridden === true,
+        ambient: [],
         durationMs: 0,
         nested: [],
       };
     }
 
-    const startedAt = Date.now();
+    const startedAt = realNow();
     const value = await execute();
     return {
       index,
@@ -255,7 +267,8 @@ export class Journal {
       stale: false,
       staleFacets: [],
       overridden: false,
-      durationMs: Date.now() - startedAt,
+      ambient: [],
+      durationMs: realNow() - startedAt,
       nested: [],
     };
   }
@@ -331,6 +344,8 @@ export interface RecordedEffect {
   requestFacets?: Record<string, string>;
   /** Set by `applyOverrides`; a log read off disk never carries it. */
   overridden?: true;
+  /** What the recorded tool call read outside the journal, if anything. */
+  ambient?: AmbientSource[];
 }
 
 /** Values to serve in place of the recorded ones, keyed by effect key. */
@@ -366,11 +381,17 @@ export function applyOverrides(
   // `failed` is dropped rather than kept: an override says what the effect
   // returned, and an effect cannot both return that and have thrown. Handing a
   // value to the call a run died on is the counterfactual worth having — what
-  // the run would have done if the model had not refused to answer.
-  return effects.map(({ failed, ...e }) =>
+  // the run would have done if the model had not refused to answer. `ambient`
+  // goes the same way and for the same reason: the substituted value came from
+  // you, not from a tool that read a clock to produce it.
+  return effects.map(({ failed, ambient, ...e }) =>
     Object.hasOwn(overrides, e.key)
       ? { ...e, value: substitute(e, overrides[e.key]), overridden: true as const }
-      : { ...e, ...(failed === undefined ? {} : { failed }) },
+      : {
+          ...e,
+          ...(failed === undefined ? {} : { failed }),
+          ...(ambient === undefined ? {} : { ambient }),
+        },
   );
 }
 
@@ -461,6 +482,7 @@ export function entryOf(effect: RecordedEffect, index: number): JournalEntry {
           },
         }),
     ...(effect.overridden ? { overridden: true as const } : {}),
+    ...(effect.ambient === undefined ? {} : { ambient: effect.ambient }),
   };
 }
 

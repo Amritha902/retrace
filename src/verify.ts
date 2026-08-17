@@ -74,6 +74,7 @@ export function verifyEvents(
     checkAccounting(events),
     checkFreeReplay(events),
     checkMarkings(events, origin),
+    checkAmbient(events),
     checkParent(events, origin, store),
     checkLineage(runId, events, origin, store),
   ];
@@ -406,6 +407,44 @@ function checkFreeReplay(events: readonly RetraceEvent[]): Check {
     replayed === 0
       ? `nothing was replayed: all ${total} effects executed and were billed at list price`
       : `${replayed} of ${total} effects came out of the log, and none of them was billed`,
+  );
+}
+
+/**
+ * Whether the answers in this log are answers a replay could get again.
+ *
+ * Every other check here holds the log to a claim about the past — that a value
+ * is the one the parent recorded, that the money adds up, that a request was
+ * asked as recorded. This one is about the future: a tool that read `Date.now()`
+ * while it ran recorded what the clock happened to say once, and every fork off
+ * this run will replay that value as though it were the tool's answer. It is the
+ * one hazard in [determinism, honestly] that used to need `recheck` and a second
+ * execution to find; the reads are watched as they happen, so the log carries it.
+ *
+ * A log written before the reads were watched carries no marks and is reported
+ * clean rather than guessed at, exactly as one written before tool-call digests
+ * is.
+ */
+function checkAmbient(events: readonly RetraceEvent[]): Check {
+  const name = "ambient";
+  const calls = effectsOf(events).filter((e) => (e.ambient?.length ?? 0) > 0);
+  const tools = effectsOf(events).filter((e) => e.kind === "tool").length;
+
+  if (calls.length === 0) {
+    return ok(
+      name,
+      tools === 0
+        ? "no tool calls, so nothing could have read a clock the journal does not cover"
+        : `${tools} tool call${tools === 1 ? "" : "s"}, none of which read a clock, an id or an RNG outside ctx`,
+    );
+  }
+
+  const sources = [...new Set(calls.flatMap((e) => e.ambient ?? []))].join(" and ");
+  return failed(
+    name,
+    `${calls.length} of ${tools} tool calls read the ${sources} outside the journal ` +
+      `(${calls.map((e) => e.key).join(", ")}) — a fork replays what they said once, ` +
+      `which is not what they would say again`,
   );
 }
 

@@ -1,3 +1,4 @@
+export { AMBIENT_SOURCES, type AmbientSource } from "./ambient.ts";
 export {
   defineAgent,
   orderFacets,
@@ -81,6 +82,7 @@ export {
   type ScriptedTurn,
 } from "./providers/mock.ts";
 export {
+  ambientEffects,
   effectsOf,
   fork,
   inspect,

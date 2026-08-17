@@ -110,6 +110,19 @@ export function overriddenEffects(events: readonly RetraceEvent[]) {
 }
 
 /**
+ * The tool calls that reached past the journal for a time, an id or a random
+ * draw while they ran.
+ *
+ * Everything else here works to make a replayed prefix free; this is the one
+ * measure of whether a replayed prefix is a *reproduction*. A tool that read
+ * `Date.now()` recorded what it happened to say once, and a fork replaying that
+ * answer is holding a snapshot rather than something the tool would say again.
+ */
+export function ambientEffects(events: readonly RetraceEvent[]) {
+  return effectsOf(events).filter((e) => (e.ambient?.length ?? 0) > 0);
+}
+
+/**
  * Everything a re-entry into a recorded run takes except where to re-enter it.
  * `fork` adds the fork point; `replay` and `resume` fix it themselves.
  */

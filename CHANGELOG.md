@@ -45,6 +45,23 @@ publish contains rather than what changed since something.
 - **`ctx.now()`, `ctx.uuid()` and `ctx.random()`** are journaled and keyed by
   the call they happened in, so a fork's live steps read the values the parent
   recorded at the same slots.
+- **A tool that goes around them is noticed.** `Date.now()`, `new Date()`,
+  `Math.random()` and `crypto.randomUUID()` are watched while a tool body runs,
+  and a call that reaches one is recorded with what it reached for, as
+  `ambient: ["clock"]`. This was the one hole in the determinism guarantee that
+  the log could not close — what the tool reached for was not in the log — and
+  finding it needed `recheck` to execute the call twice and report `unstable`.
+  Now the run that records the call says so, for nothing: `show` prints
+  `reads clock`, the report badges it, and `verify` fails its new `ambient`
+  check naming the calls whose recorded answers are snapshots rather than
+  answers a replay could get again. The wrappers delegate and only observe, and
+  come down when the last tool body returns; `new Date(ms)` is arithmetic and is
+  not a clock read. Reads are attributed by async context, so a `parallelTools`
+  batch marks the call that reached and not the one beside it. A log written
+  before this existed carries no marks and is reported clean rather than guessed
+  at. Two things stay out of reach and are documented as such: `randomUUID`
+  imported from `node:crypto`, which is a binding rather than a global, and a
+  clock read in a subprocess — both still `recheck`'s to find.
 - **A model call that throws is an outcome, not a gap.** The failure is
   recorded where the value would have gone, as `failed: { name, message }`, so a
   run that died on a 529 replays into the same error without calling anything.

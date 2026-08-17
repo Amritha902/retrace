@@ -473,3 +473,56 @@ test("loading a module names what is wrong with it", async () => {
   await assert.rejects(loadRunModule(BROKEN), /tool named "lookup" with no run function/);
   await assert.rejects(loadRunModule("./no/such/module.ts"), /cannot load module/);
 });
+
+test("show and verify both say when a tool read a clock the journal does not cover", async (t) => {
+  const dir = tempDir(t);
+  const stamp = tool({
+    name: "stamp",
+    description: "Stamp a record with the time. Call this to file a record.",
+    inputSchema: objectSchema({ label: { type: "string" } }),
+    run: (input: { label: string }) => `${input.label} at ${Date.now()}`,
+  });
+  await run("file a record", {
+    agent,
+    provider: new MockProvider([
+      { content: [toolUse("t1", "stamp", { label: "one" })] },
+      { content: [text("filed")] },
+    ]),
+    tools: [stamp],
+    store: new RunStore(dir),
+    runId: "snapshot",
+  });
+
+  const shown = capture();
+  assert.equal(await main(["show", "snapshot", "--dir", dir], shown), 0);
+  assert.match(shown.text(), /step:0#0:stamp\s+\d+ms\s+reads clock/);
+
+  const verified = capture();
+  assert.equal(await main(["verify", "snapshot", "--dir", dir], verified), 1);
+  assert.match(verified.text(), /fail\s+ambient\s+1 of 1 tool calls read the clock/);
+});
+
+test("a replay of such a run reports the calls it replayed a snapshot for", async (t) => {
+  const dir = tempDir(t);
+  const stamp = tool({
+    name: "stamp",
+    description: "Stamp a record with the time. Call this to file a record.",
+    inputSchema: objectSchema({ label: { type: "string" } }),
+    run: (input: { label: string }) => `${input.label} at ${Date.now()}`,
+  });
+  await run("file a record", {
+    agent,
+    provider: new MockProvider([
+      { content: [toolUse("t1", "stamp", { label: "one" })] },
+      { content: [text("filed")] },
+    ]),
+    tools: [stamp],
+    store: new RunStore(dir),
+    runId: "snapshot",
+  });
+
+  const io = capture();
+  assert.equal(await main(["replay", "snapshot", "--dir", dir], io), 0);
+  assert.match(io.text(), /1 tool call read the clock outside the journal: step:0#0:stamp/);
+  assert.match(io.text(), /take these from ctx instead/);
+});

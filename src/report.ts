@@ -375,7 +375,21 @@ function mark(effect: Effect): string {
   return (
     state +
     (effect.overridden ? setBadge() : "") +
-    (effect.stale ? staleBadge(effect.staleFacets ?? []) : "")
+    (effect.stale ? staleBadge(effect.staleFacets ?? []) : "") +
+    (effect.ambient?.length ? ambientBadge(effect.ambient) : "")
+  );
+}
+
+/**
+ * The tool took its time, its id or its random draw from outside the journal,
+ * so what the log holds is what it said once rather than what it would say
+ * again. The only badge here that marks a problem rather than a consequence.
+ */
+function ambientBadge(sources: readonly string[]): string {
+  return (
+    `<span class="badge ambient" title="this tool read a clock, an id or an RNG the ` +
+    `journal does not cover, so a replay of it holds a snapshot rather than an answer">` +
+    `reads ${escape(sources.join(", "))}</span>`
   );
 }
 
@@ -535,6 +549,7 @@ padding:.7rem .85rem;margin-bottom:.6rem}
 .badge.unrun{color:var(--bad);background:var(--bad-bg)}
 .badge.stale{color:var(--soft);border:1px dashed var(--rule);padding:0 .3rem}
 .badge.set{color:var(--set);background:var(--set-bg)}
+.badge.ambient{color:var(--bad);background:var(--bad-bg)}
 .tag{font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;color:var(--soft)}
 .tag.failed{color:var(--bad)}
 .kind{font-size:.8rem;color:var(--soft)}
