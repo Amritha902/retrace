@@ -1,8 +1,17 @@
 import { randomUUID } from "node:crypto";
 
-import { realNow, realRandom, watchAmbient, type AmbientSource } from "./ambient.ts";
+import { realNow, realRandom, unwatched, watchAmbient, type AmbientSource } from "./ambient.ts";
 import { Budget } from "./budget.ts";
 import { BudgetExceededError, IrreversibleToolError, ToolNotFoundError } from "./errors.ts";
+import {
+  bodyDigestOf,
+  captureFetch,
+  captureFetchFailure,
+  fetchSlot,
+  rebuildResponse,
+  requestOf,
+  type RecordedFetch,
+} from "./http.ts";
 import {
   DETERMINISTIC_KINDS,
   Journal,
@@ -667,10 +676,14 @@ function toolResult(call: ToolUse, value: ToolResult): UserBlock {
 function toolContext(step: number, ownerKey: string, take: Take): ToolContext {
   const ordinals = new Map<string, number>();
 
-  const at = <T>(kind: DeterministicKind, execute: () => T): Promise<T> => {
+  const at = <T>(
+    kind: DeterministicKind,
+    execute: () => T | Promise<T>,
+    suffix = "",
+  ): Promise<T> => {
     const ordinal = ordinals.get(kind) ?? 0;
     ordinals.set(kind, ordinal + 1);
-    return take(kind, nestedKey(ownerKey, kind, ordinal), execute);
+    return take(kind, nestedKey(ownerKey, kind, ordinal) + suffix, execute);
   };
 
   return {
@@ -680,6 +693,25 @@ function toolContext(step: number, ownerKey: string, take: Take): ToolContext {
     now: () => at("clock", realNow),
     uuid: () => at("uuid", () => randomUUID()),
     random: () => at("random", realRandom),
+    fetch: async (input, init) => {
+      const request = requestOf(input, init);
+      const recorded = await at<RecordedFetch>(
+        "fetch",
+        async () => {
+          // Through the global rather than a reference captured at load, so a
+          // caller that has installed its own `fetch` still gets it; outside the
+          // watch, so a read the journal covers is not reported as one that got
+          // around it.
+          try {
+            return await captureFetch(request, await unwatched(() => globalThis.fetch(input, init)));
+          } catch (cause) {
+            return captureFetchFailure(request, cause);
+          }
+        },
+        `:${fetchSlot(request, bodyDigestOf(init))}`,
+      );
+      return rebuildResponse(recorded);
+    },
   };
 }
 

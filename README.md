@@ -512,10 +512,75 @@ for step 3, which ran live against the new world; steps 1 and 2 are the old
 world's answers, kept for their price. Fork lower to make more of the run
 respond to the change, and pay for more of it.
 
+## Reading the network
+
+The largest thing a tool does that a log could not follow used to be the one
+thing most tools are *for*: going and asking something. `ctx.fetch` is `fetch`
+with the answer recorded:
+
+```ts
+run: async ({ query }, ctx) => {
+  const res = await ctx.fetch(`https://corpus.internal/search?q=${query}`);
+  return (await res.json()).hits.join("\n");
+},
+```
+
+```
+$ retrace show read
+
+step 0
+  live      model  step:0  1980ms
+  live      tool   step:0#0:search  412ms
+        → 3 results for "pricing"
+  live      fetch  step:0#0:search/fetch:0:7614deb6df66  38ms
+        → GET https://corpus.internal/search?q=pricing → 200 (1284B)
+```
+
+A replay never reaches the corpus. Neither does the live tail of a fork, where
+the call executes for real and its `fetch` comes back out of the log — which is
+what makes a fork a controlled experiment rather than a second run: the fork
+differs from its parent in the thing you changed, and the world it ran in is the
+world its parent ran in.
+
+Status, status text, headers, body and `url` all round-trip, and the `Response`
+a tool is handed is built the same way on both passes, so a tool cannot behave
+one way while being recorded and another way afterwards. A body that is text
+goes in the log as text and stays readable; bytes that are not text go in as
+base64. A fetch that *rejected* is recorded too and rejects again on replay, so
+a run that died because a host was down does not replay into one that reached
+it.
+
+What keeps this from being a cache that lies: the key carries a digest of the
+request as well as the slot. `step:0#0:search/fetch:0:5d8f110cfaa9` is the first
+fetch of that call *asking that question*, so a live call asking something else
+finds nothing there and goes to the network, rather than being handed the
+parent's answer to a question it did not ask. Method, URL and a text body are
+what that digest covers; a stream or a blob body is not, and two calls differing
+only there share a slot.
+
+The other half is the tools that don't use it. `fetch` is watched exactly as the
+clock and the RNG are, so a tool that reaches for the global one is recorded with
+what it reached for:
+
+```
+$ retrace verify read
+
+  fail ambient      1 of 3 tool calls read the network outside the journal
+                    (step:0#0:search) — a fork replays what they said once,
+                    which is not what they would say again
+```
+
+`recheck` is the one command that deliberately does *not* serve a recorded
+response. Whether the world still says what the log holds is the question it
+exists to ask, so its network reads go live while the clock, the ids and the
+randomness stay pinned to what the run recorded — which leaves the network as
+the only thing a disagreement can be about.
+
 ## Time, ids and randomness
 
-A tool's second argument is the journal. Anything taken from it is recorded and
-comes back unchanged later:
+A tool's second argument is the journal — [`ctx.fetch`](#reading-the-network)
+above, and three smaller reads. Anything taken from it is recorded and comes
+back unchanged later:
 
 ```ts
 run: async ({ amount }, ctx) => {
@@ -553,10 +618,10 @@ step 0
             → filed at 1786988483725
 ```
 
-While a tool body runs, `Date.now()`, `new Date()`, `Math.random()` and
-`crypto.randomUUID()` are watched. A call that reaches one is recorded with what
-it reached for, so the log itself says which of its answers are snapshots rather
-than answers — the tool would not give that value again, and every fork off this
+While a tool body runs, `Date.now()`, `new Date()`, `Math.random()`,
+`crypto.randomUUID()` and `fetch` are watched. A call that reaches one is
+recorded with what it reached for, so the log itself says which of its answers
+are snapshots rather than answers — the tool would not give that value again, and every fork off this
 run will replay it as though it would.
 
 ```
@@ -576,7 +641,7 @@ had and is not a clock read; only the zero-argument form is.
 
 Two things it cannot see. `randomUUID` imported from `node:crypto` is a binding
 rather than a global, and a tool that reads the clock inside a subprocess or
-across the network is somewhere no wrapper reaches. Both come back clean here and
+behind a native HTTP client is somewhere no wrapper reaches. Both come back clean here and
 are what [`recheck`](#checking-a-log-against-the-world) is still for: it executes
 a disagreeing call twice and reports `unstable` on what it cannot pin down. This
 is the cheaper half of the same question, answered while the run is being
@@ -630,9 +695,10 @@ in the same slots with the same keys — `step:0#0:search` before `step:0#1:sear
 recorded with it off produce the same event log, which is what lets a parallel
 run replay, fork, and diff like any other.
 
-Time and ids survive the same way, because a `ctx.now()` read resolves by key
-rather than by whoever reached it first: `step:0#1:search/clock:0` is the same
-slot no matter when in the batch it was read.
+Time, ids and fetches survive the same way, because a `ctx.now()` read resolves
+by key rather than by whoever reached it first: `step:0#1:search/clock:0` is the
+same slot no matter when in the batch it was read, and a response lands under
+the call that asked for it however late the corpus was in answering.
 
 It is off by default, and the reason is in the name of the guarantee. The *log*
 is deterministic; the *side effects* aren't. Four reads overlapping is fine; two
@@ -857,7 +923,8 @@ forked from demo-original at step 3
   ok   accounting   $0.9200 at list price, $0.2300 billed, $0.6900 saved — the charges add up
   ok   free replay  6 of 7 effects came out of the log, and none of them was billed
   ok   markings     3 stale (system), 0 substituted, all of them served from the log
-  ok   ambient      3 tool calls, none of which read a clock, an id or an RNG outside ctx
+  ok   ambient      3 tool calls, none of which read a clock, an id, an RNG or the
+                    network outside ctx
   ok   parent       6 replayed effects are demo-original's, value for value
   ok   lineage      6 free effects trace back to demo-original, which executed and paid for them
 
@@ -867,8 +934,9 @@ verified: this log holds up against everything it claims
 `ambient` is the odd one out, and the only check here that is about the future
 rather than the past. Everything else holds the log to something that already
 happened; this one asks whether the answers in it are answers a replay could get
-again. A tool that read `Date.now()` while it ran recorded what the clock
-happened to say once, and it fails:
+again. A tool that read `Date.now()` — or reached the network through the global
+`fetch` rather than `ctx.fetch` — while it ran recorded what the world happened
+to say once, and it fails:
 
 ```
   fail ambient      1 of 3 tool calls read the clock outside the journal
@@ -1184,7 +1252,7 @@ it is `recheckRun(runId, { tools })`.
 
 Runs are JSONL under `.retrace/runs/<run-id>.jsonl`, one event per line, appended synchronously. If the process dies mid-run the log is still a truthful prefix — a torn final line is dropped on read, and everything before it stands — and a truthful prefix is enough to [pick the run back up](#picking-a-run-back-up). `MemoryStore` is the same interface with nothing on disk.
 
-The log holds normalized, provider-agnostic content, plus the provider's own blocks verbatim (thinking blocks are signed and have to be echoed back byte-for-byte). A run recorded today still replays after the SDK's types change underneath it. It also holds the tool declarations the run was recorded with, as the model was shown them — the agent spec carries the model and the prompt but never those, and without them a `stale (tools)` marking is the one staleness nothing could follow up.
+The log holds normalized, provider-agnostic content, plus the provider's own blocks verbatim (thinking blocks are signed and have to be echoed back byte-for-byte). A response a tool fetched through `ctx.fetch` is flattened into the parts a tool can read back out — status, status text, headers and body — because a `Response` is a one-shot stream over a socket that is closed long before anyone replays it. A run recorded today still replays after the SDK's types change underneath it. It also holds the tool declarations the run was recorded with, as the model was shown them — the agent spec carries the model and the prompt but never those, and without them a `stale (tools)` marking is the one staleness nothing could follow up.
 
 ## Determinism, honestly
 
@@ -1200,21 +1268,37 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   claim about itself and there is nothing else to read it from.
 - **A resume re-runs the tool call that was in flight when the run died.** Its result never reached the log, so as far as the log is concerned it never ran — and the log is all `resume` has. A tool that had already done its work and was killed before returning does that work twice. This is the same hazard as the bullet above, arriving at the one moment you are least likely to be thinking about it — and the one the mark above is most worth having for, since the run that died is the one you had least warning about.
 - **Tools run sequentially by default**, in the order the model requested them. `parallelTools` overlaps them and still records deterministically — results are journaled in request order, and time and ids resolve by key — but the side-effect ordering isn't, which is why it is opt-in rather than on.
+- **Network reads are journaled only if you take them from the tool context.**
+  `ctx.fetch` records the response — status, headers, body, and a rejection —
+  and hands it back on a replay and in the live tail of a fork, so a run's
+  answers stop depending on a corpus that has moved since. What it covers is
+  `fetch`: a tool reaching the network through a native client, a database
+  driver or a subprocess is outside it, and comes back marked only where the
+  global `fetch` is what it used. Its slot carries a digest of method, URL and
+  a text body, so a call asking something else goes live rather than being
+  handed the wrong answer — but a request that differs only in a stream or a
+  blob body shares a slot with the one recorded there. And a recorded response
+  is a snapshot of what the corpus said then: that is the point on a fork, and
+  it is exactly what [`recheck`](#checking-a-log-against-the-world) refuses to
+  serve, since asking whether it still holds is the one thing that command is
+  for.
 - **Clock and randomness are journaled only if you take them from the tool
   context.** `ctx.now()`, `ctx.uuid()` and `ctx.random()` are recorded and
   stable; a tool that calls `Date.now()` directly still reads the real clock and
   may branch differently when it goes live. Nothing can make such a tool
   replayable short of taking the value from `ctx` — but the log no longer has to
-  be silent about it. The ambient clock, `Date`, `Math.random` and
-  `crypto.randomUUID` are watched while a tool body runs, and a call that reaches
-  one is recorded with what it reached for, so `show`, the report and `verify`'s
-  `ambient` check all name the calls whose recorded answers are snapshots. The
-  watch is scoped to the moments a tool is executing and only observes; what it
-  costs is the identity of `globalThis.Date` for those moments, since telling
-  `new Date()` from `new Date(ms)` needs the constructor. Two ways out remain:
-  `randomUUID` imported from `node:crypto` is a binding rather than a global, and
-  a clock read in a subprocess or across the network is somewhere no wrapper
-  goes. [`recheck`](#checking-a-log-against-the-world) is the check that still
+  be silent about it. The ambient clock, `Date`, `Math.random`,
+  `crypto.randomUUID` and `fetch` are watched while a tool body runs, and a call
+  that reaches one is recorded with what it reached for, so `show`, the report
+  and `verify`'s `ambient` check all name the calls whose recorded answers are
+  snapshots. The watch is scoped to the moments a tool is executing and only
+  observes; what it costs is the identity of `globalThis.Date` for those moments,
+  since telling `new Date()` from `new Date(ms)` needs the constructor. `fetch`
+  is taken from the global at that moment rather than at load, so a caller that
+  has installed its own is not quietly restored to the original. Two ways out
+  remain: `randomUUID` imported from `node:crypto` is a binding rather than a
+  global, and a read in a subprocess or through a client that does not go
+  through `globalThis.fetch` is somewhere no wrapper goes. [`recheck`](#checking-a-log-against-the-world) is the check that still
   catches those, by executing a disagreeing call a second time against the same
   recorded reads and reporting `unstable` rather than `moved`.
 - **A fork point inside a step keeps the model turn that asked.** `atEffect`
@@ -1257,7 +1341,8 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   prefix is the prefix its parent recorded, that following the chain up leads to
   a run that executed and was billed for it, that the money adds up to the
   savings claimed, and — in `ambient` — that no tool call in it took its time,
-  its ids or its randomness from somewhere a replay cannot follow. It cannot
+  its ids, its randomness or its answers off the network from somewhere a
+  replay cannot follow. It cannot
   tell you the recorded values were the right answers, or that a tool asked the
   same question today would still say the same thing — nothing that reads only a
   log can. `recheck` executes the tools and
@@ -1298,14 +1383,18 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   call the clock, ids and randomness the log recorded at the same slots, so a
   tool that takes those from `ctx` is compared on what it said rather than on
   when it was asked; a tool reading `Date.now()` directly comes back `unstable`,
-  which is the honest name for what would happen to it on a fork.
+  which is the honest name for what would happen to it on a fork. `ctx.fetch` is
+  the one read it does *not* serve from the log: everything else is pinned so
+  that the network is the only thing a disagreement can be about, which is what
+  makes a tool that reads the world through `ctx.fetch` the tool this command
+  can be precise about.
 - **An override is a counterfactual for the steps above it and nothing else.** Replacing a value changes what the live steps see; the replayed steps between it and the fork point still come out of the log as recorded, and are marked `stale` for it — the model calls on `conversation`, and any tool call whose input the substitution moved on `input`. The fork's log is a truthful record of a run that answered a question its parent never asked — it is not a record of what the parent would have done, because nothing re-ran to find out.
 
 ## Status
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
-one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log, the `diff` comparison that holds two logs to the prefix they claim from the same source, and the `recheck` re-execution including its `unstable` finding, the watch on the
-ambient clock and RNG that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, and the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for — is covered by 361 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads inside the boundary, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log, the `diff` comparison that holds two logs to the prefix they claim from the same source, and the `recheck` re-execution including its `unstable` finding, the watch on the
+ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, and the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for — is covered by 376 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -1313,7 +1402,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 361 tests, no network, no API key
+npm test           # 376 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

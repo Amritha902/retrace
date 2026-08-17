@@ -4,6 +4,8 @@
  * replayed.
  */
 
+import type { FetchInput } from "./http.ts";
+
 import type { AmbientSource } from "./ambient.ts";
 
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -55,9 +57,10 @@ export interface ToolSchema {
 }
 
 /**
- * The journal, as a tool sees it. Time, ids and randomness taken from here are
- * recorded and come back unchanged on a replay or a fork; `Date.now()` and
- * `Math.random()` called directly are still just the clock and the RNG.
+ * The journal, as a tool sees it. Time, ids, randomness and network reads taken
+ * from here are recorded and come back unchanged on a replay or a fork;
+ * `Date.now()`, `Math.random()` and a bare `fetch` called directly are still
+ * just the clock, the RNG and the network.
  */
 export interface ToolContext {
   /** Which step of the run this call belongs to. */
@@ -68,6 +71,20 @@ export interface ToolContext {
   uuid(): Promise<string>;
   /** A float in [0, 1). */
   random(): Promise<number>;
+  /**
+   * `fetch`, with the response recorded and replayed.
+   *
+   * The body is read into the log, so the `Response` handed back is rebuilt
+   * from it on both passes — a live call and a replayed one give a tool the
+   * same object, which is what keeps the journal from being a difference in
+   * itself. A rejection is recorded too and thrown again on replay.
+   *
+   * A response is served from the log only for a call asking the same method,
+   * URL and text body at the same position in the same tool call; anything else
+   * goes to the network. A non-text body — a stream, a blob, form data — is not
+   * part of that comparison, so two calls differing only there share a slot.
+   */
+  fetch(input: FetchInput, init?: RequestInit): Promise<Response>;
 }
 
 export interface Tool extends ToolSchema {
@@ -287,7 +304,7 @@ export type RetraceEvent =
       step: number;
       /** Position within the run's effect sequence. Dense, zero-based. */
       index: number;
-      kind: "model" | "tool" | "clock" | "uuid" | "random";
+      kind: "model" | "tool" | "clock" | "uuid" | "random" | "fetch";
       /** Semantic identity of this effect. A mismatch on replay means divergence. */
       key: string;
       /** What the effect returned, or null when it threw — see `failed`. */

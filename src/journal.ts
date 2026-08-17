@@ -93,11 +93,19 @@ export interface EffectOutcome<T> {
 export type DivergencePolicy = "strict" | "live";
 
 /**
- * Kinds whose values are arbitrary: a timestamp, an id, a random draw. Nothing
- * downstream cares *what* they are, only that they don't change between runs.
- * They resolve by key rather than by position — see `Journal.deterministic`.
+ * Kinds that resolve by key rather than by position — see
+ * `Journal.deterministic`.
+ *
+ * Three of them are values nothing downstream cares about: a timestamp, an id,
+ * a random draw, which only have to not change between runs. `fetch` is the odd
+ * one, because a response very much has a meaning — but it belongs here for the
+ * same reason: it is a read a tool made rather than a step the loop took, so it
+ * is not part of the shape of the run, and a fork that goes live past the end of
+ * the log should still see the world its parent saw. What keeps it honest is
+ * that its key carries a digest of the request, so a call asking something else
+ * finds no entry rather than the wrong one.
  */
-export const DETERMINISTIC_KINDS = ["clock", "uuid", "random"] as const;
+export const DETERMINISTIC_KINDS = ["clock", "uuid", "random", "fetch"] as const;
 
 /** Separates an effect from the effects recorded inside it. */
 const NESTED = "/";

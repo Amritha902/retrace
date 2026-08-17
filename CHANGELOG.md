@@ -55,8 +55,25 @@ publish contains rather than what changed since something.
 - **`ctx.now()`, `ctx.uuid()` and `ctx.random()`** are journaled and keyed by
   the call they happened in, so a fork's live steps read the values the parent
   recorded at the same slots.
+- **`ctx.fetch` journals the network**, which was the largest nondeterministic
+  thing a tool did that the log could not follow. The response is flattened into
+  the log — status, status text, headers, body as text where the bytes are text
+  and base64 where they are not — and rebuilt on the way back out, so a live
+  call and a replayed one hand a tool the same `Response`, `url` included. A
+  rejection is recorded and thrown again, so a run that died because a host was
+  down does not replay into one that reached it. Its slot resolves by key rather
+  than by position, like the clock and the RNG, which means the live tail of a
+  fork sees the world its parent saw and differs from it only in what you
+  changed. What keeps that from being a cache that lies is a digest of the
+  method, URL and text body folded into the key: a call asking something else
+  finds nothing in that slot and goes to the network rather than being handed
+  the wrong answer. `recheck` is the deliberate exception and does not serve
+  recorded responses — whether the world still says what the log holds is the
+  question it exists to ask — so its network reads go live while the clock, the
+  ids and the randomness stay pinned, leaving the network as the only thing a
+  disagreement can be about.
 - **A tool that goes around them is noticed.** `Date.now()`, `new Date()`,
-  `Math.random()` and `crypto.randomUUID()` are watched while a tool body runs,
+  `Math.random()`, `crypto.randomUUID()` and `fetch` are watched while a tool body runs,
   and a call that reaches one is recorded with what it reached for, as
   `ambient: ["clock"]`. This was the one hole in the determinism guarantee that
   the log could not close — what the tool reached for was not in the log — and
@@ -71,7 +88,10 @@ publish contains rather than what changed since something.
   before this existed carries no marks and is reported clean rather than guessed
   at. Two things stay out of reach and are documented as such: `randomUUID`
   imported from `node:crypto`, which is a binding rather than a global, and a
-  clock read in a subprocess — both still `recheck`'s to find.
+  read in a subprocess or through a client that never touches
+  `globalThis.fetch` — both still `recheck`'s to find. `fetch` is taken from the
+  global when the watch goes up rather than at load, so a caller that installed
+  its own is not quietly restored to the original when a tool finishes.
 - **A model call that throws is an outcome, not a gap.** The failure is
   recorded where the value would have gone, as `failed: { name, message }`, so a
   run that died on a 529 replays into the same error without calling anything.

@@ -1,11 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 /**
- * Somewhere a tool can get a time, an id or a random draw without going through
- * the journal. `ctx.now()` and its two siblings are recorded and come back
- * unchanged on a replay; `Date.now()` reads the real clock every time.
+ * Somewhere a tool can get a time, an id, a random draw or an answer off the
+ * network without going through the journal. `ctx.now()` and its siblings are
+ * recorded and come back unchanged on a replay; `Date.now()` reads the real
+ * clock every time, and a bare `fetch` reaches the world every time.
  */
-export const AMBIENT_SOURCES = ["clock", "random", "uuid"] as const;
+export const AMBIENT_SOURCES = ["clock", "random", "uuid", "network"] as const;
 
 export type AmbientSource = (typeof AMBIENT_SOURCES)[number];
 
@@ -35,13 +36,38 @@ const running = new AsyncLocalStorage<Set<AmbientSource>>();
 /** How many tool bodies are in flight; the wrappers come down at zero. */
 let watching = 0;
 
+/**
+ * The `fetch` in place when the watch went up.
+ *
+ * Captured at install rather than at load, unlike the clock and the RNG. Those
+ * are language built-ins and retrace's own reads of them must never look like a
+ * tool's; `fetch` is routinely replaced — by a test, by a proxy, by an
+ * instrumentation library — and restoring the one from module load would undo
+ * somebody else's substitution as a side effect of running a tool.
+ */
+let realFetch: typeof globalThis.fetch;
+
 function note(source: AmbientSource): void {
   running.getStore()?.add(source);
 }
 
 /**
- * Run a tool body with the ambient clock, id source and RNG under observation,
- * and report which of them it touched.
+ * Run something outside the watch, so what it reaches for is not attributed to
+ * the tool that caused it.
+ *
+ * `ctx.fetch` is the caller: it goes through the journal, which is the opposite
+ * of the thing being looked for, and it reaches the network through the same
+ * global the watch has wrapped. Leaving the async-local store is what tells the
+ * two apart — and it costs nothing, because a read the journal covers is
+ * already recorded where it matters.
+ */
+export function unwatched<T>(body: () => T): T {
+  return running.exit(body);
+}
+
+/**
+ * Run a tool body with the ambient clock, id source, RNG and `fetch` under
+ * observation, and report which of them it touched.
  *
  * This is the one hole in the determinism guarantee that the log could not
  * otherwise close: a tool that stamps `Date.now()` into what it returns records
@@ -108,6 +134,11 @@ function install(): void {
     note("uuid");
     return REAL_UUID();
   };
+  realFetch = globalThis.fetch;
+  globalThis.fetch = (input, init) => {
+    note("network");
+    return realFetch(input, init);
+  };
 }
 
 function uninstall(): void {
@@ -116,4 +147,5 @@ function uninstall(): void {
   globalThis.Date = REAL_DATE;
   globalThis.Math.random = REAL_RANDOM;
   delete (globalThis.crypto as { randomUUID?: unknown }).randomUUID;
+  globalThis.fetch = realFetch;
 }

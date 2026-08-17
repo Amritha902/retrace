@@ -8,6 +8,7 @@
  * whose whole claim is that a recorded run reproduces.
  */
 import { orderFacets } from "./agent.ts";
+import { describeFetch, type RecordedFetch } from "./http.ts";
 import { formatUsd } from "./pricing.ts";
 import { effectsOf, type RunSummary } from "./replay.ts";
 import type { ContentBlock, ModelResponse, RetraceEvent, Usage } from "./types.ts";
@@ -311,6 +312,7 @@ function readValue(effect: Effect): string {
   if (effect.kind === "clock" && typeof effect.value === "number") {
     return `${effect.value}  ${isoTime(effect.value)}`;
   }
+  if (effect.kind === "fetch") return describeFetch(effect.value as RecordedFetch);
   return typeof effect.value === "string" ? effect.value : JSON.stringify(effect.value);
 }
 

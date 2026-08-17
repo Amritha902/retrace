@@ -5,6 +5,7 @@ import { orderFacets } from "./agent.ts";
 import { collectBundle, importBundle, parseBundle, serializeBundle } from "./bundle.ts";
 import { compareRuns, type EffectPair, type RunComparison } from "./compare.ts";
 import { explainStale } from "./explain.ts";
+import { describeFetch, type RecordedFetch } from "./http.ts";
 import { loadRunModule, type RunModule } from "./module.ts";
 import { planFork } from "./plan.ts";
 import { formatUsd } from "./pricing.ts";
@@ -242,6 +243,11 @@ function printEvent(io: Io, event: RetraceEvent): void {
       if (event.kind === "tool") {
         const v = event.value as { content?: string; isError?: boolean };
         io.out(`        ${v.isError ? red("error") : dim("→")} ${truncate(v.content ?? "", 120)}\n`);
+      }
+      // The key of a fetch carries a digest of the request rather than the
+      // request, so the line above says which slot and not what was asked.
+      if (event.kind === "fetch") {
+        io.out(`        ${dim("→")} ${truncate(describeFetch(event.value as RecordedFetch), 120)}\n`);
       }
       break;
     }

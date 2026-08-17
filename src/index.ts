@@ -66,6 +66,7 @@ export {
   type RecordedEffect,
   type Stamp,
 } from "./journal.ts";
+export { describeFetch, type FetchInput, type RecordedFetch } from "./http.ts";
 export { loadRunModule, type RunModule } from "./module.ts";
 export {
   planFork,

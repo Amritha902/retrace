@@ -407,7 +407,8 @@ function checkAmbient(events: readonly RetraceEvent[]): Check {
       name,
       tools === 0
         ? "no tool calls, so nothing could have read a clock the journal does not cover"
-        : `${tools} tool call${tools === 1 ? "" : "s"}, none of which read a clock, an id or an RNG outside ctx`,
+        : `${tools} tool call${tools === 1 ? "" : "s"}, none of which read a clock, an id, an RNG ` +
+          `or the network outside ctx`,
     );
   }
 
