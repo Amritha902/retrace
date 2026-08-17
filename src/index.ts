@@ -50,6 +50,7 @@ export {
 export {
   applyOverrides,
   describeFailure,
+  movedFacets,
   DETERMINISTIC_KINDS,
   deterministicEntries,
   entryOf,
@@ -66,10 +67,20 @@ export {
   type Stamp,
 } from "./journal.ts";
 export { loadRunModule, type RunModule } from "./module.ts";
+export {
+  planFork,
+  planForkEvents,
+  plannedStaleFacets,
+  type ForkPlan,
+  type PlanOptions,
+  type PlannedCall,
+  type PlannedStaleness,
+} from "./plan.ts";
 export { formatUsd, getRate, priceUsage, setRate, type RateCard } from "./pricing.ts";
 export {
   rebuildRequests,
   recordedMessages,
+  stampOf,
   type RebuiltCall,
   type RebuiltRequests,
 } from "./rebuild.ts";
@@ -85,6 +96,7 @@ export {
   ambientEffects,
   effectsOf,
   fork,
+  forkCut,
   inspect,
   overriddenEffects,
   replay,

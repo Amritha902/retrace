@@ -1,12 +1,7 @@
-import {
-  orderFacets,
-  requestFacets,
-  requestFingerprint,
-  toolFacets,
-  toolFingerprint,
-} from "./agent.ts";
+import { orderFacets } from "./agent.ts";
+import { movedFacets } from "./journal.ts";
 import { formatUsd } from "./pricing.ts";
-import { rebuildRequests, recordedMessages, type RebuiltCall } from "./rebuild.ts";
+import { rebuildRequests, recordedMessages, stampOf } from "./rebuild.ts";
 import { effectsOf } from "./replay.ts";
 import { fingerprint, RunStore } from "./store.ts";
 import { ZERO_USAGE, type ForkOrigin, type RetraceEvent, type Usage } from "./types.ts";
@@ -212,7 +207,7 @@ function checkRequests(events: readonly RetraceEvent[]): Check {
       checked++;
       continue;
     }
-    const moved = movedFacets(effect.requestFacets, stamp.facets);
+    const moved = orderFacets(movedFacets(effect.requestFacets, stamp.facets));
     return failed(
       name,
       call.kind === "model"
@@ -255,29 +250,6 @@ function checkRequests(events: readonly RetraceEvent[]): Check {
     name,
     `${checked} calls answer the request this log rebuilds, digest for digest` +
       (undigested > 0 ? `; ${plural(undigested, "call")} predates the digests` : ""),
-  );
-}
-
-/** What the loop would have stamped this call with, had it made it just now. */
-function stampOf(call: RebuiltCall): { hash: string; facets: Record<string, string> } {
-  return call.kind === "model"
-    ? { hash: requestFingerprint(call.request), facets: requestFacets(call.request) }
-    : { hash: toolFingerprint(call.call), facets: toolFacets(call.call) };
-}
-
-/**
- * The components two stamps disagree on. A facet on one side and not the other
- * counts as moved — the component is there in one request and absent from the
- * other — and a recorded stamp with no facets at all names nothing rather than
- * naming everything.
- */
-function movedFacets(
-  was: Record<string, string> | undefined,
-  now: Record<string, string>,
-): string[] {
-  if (was === undefined) return [];
-  return orderFacets(
-    [...new Set([...Object.keys(was), ...Object.keys(now)])].filter((f) => was[f] !== now[f]),
   );
 }
 

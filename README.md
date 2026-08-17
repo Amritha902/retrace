@@ -262,6 +262,74 @@ const again = await replay(result.runId, { provider, tools: [search] });
 // Reaches neither the model nor the tools. Same output, $0.
 ```
 
+## The fork you haven't run yet
+
+Every line `fork` prints about its prefix is something it worked out *after*
+paying for a live step. It did not have to: the cut, the requests the replayed
+steps would be answering, the tools the module declares, the calls the fork
+point's own step would repeat — all of that is in the log and in the module
+before anything executes. `plan` says it beforehand:
+
+```bash
+retrace plan demo-original --at 3 --module ./agent-module.ts
+```
+
+```
+demo-original  completed
+analyst · claude-opus-5 · fork at step 3
+
+  replays   6 of 7 effects, 3 steps whole · $0.6900 of $0.9200 not spent again
+  live      step 3 onward: the model call, and whatever it asks for
+  stale     3 replayed model calls would answer a request this fork no longer builds — system
+            step:0, step:1, step:2
+
+nothing ran: this is the fork read off the log, before you pay for it
+```
+
+That is the same `stale (system)` the fork itself reports, arrived at the same
+way: the prefix is cut where `fork` cuts it, each replayed request is rebuilt out
+of this run's own effects the way [`verify`](#the-log-against-itself) rebuilds
+them, and the digest recorded beside each recorded answer is what it is compared
+against. What changes is when you find out — and the case worth finding out
+early is the one you did not mean:
+
+```
+  stale     3 replayed model calls would answer a request this fork no longer builds — system, tools
+            step:0, step:1, step:2
+  tools     the log declares "search", and this module does not — a live step
+            that asks for one would fail
+```
+
+`system` is the fork doing what you asked. `tools` beside it is a module that is
+not the one the run was recorded against, and every live step of that fork is
+about to be answered by a model that has not been shown the tool it needs.
+
+The other half is the call a fork would refuse to make. Forking at an effect
+keeps the model turn that asked, so the rest of that step's calls are exactly
+what will run — and whether one of them is
+[irreversible](#tools-that-cant-be-taken-back) is a question the tool answers
+today rather than something the log remembers:
+
+```
+$ retrace plan demo-original --at 'step:1#0:lookup' --module ./agent-module.ts
+...
+  live      step:1#0:lookup onward: 2 recorded tool calls, then whatever the step
+            after it asks for
+  held      "send_email" at step:1#1:send_email is marked irreversible — this fork
+            would stop there rather than make the call again
+
+would not run: fork above step:1#1:send_email to replay it instead, or pass
+--allow-irreversible
+```
+
+It exits non-zero on that and zero otherwise, so it works as a pre-flight check
+in front of a fork. Past the fork point there is nothing for it to say: the model
+has not been asked yet, and what it asks for next is the whole reason you are
+forking there. Run it without `--module` and the arithmetic of the free prefix
+still holds — that much is in the log — while the staleness comes back
+unpredicted rather than guessed at, in the same way `verify` reports a request it
+has no tools to rebuild. In code it is `planFork(runId, { atStep, tools })`.
+
 ## Picking a run back up
 
 A run that died at step nine — the process was killed, the machine went away,
@@ -670,6 +738,7 @@ retrace replay <run-id>       # re-run it from the log and check it reproduces
 retrace fork <run-id> --at N  # replay the steps below N, then run live
 retrace fork … --at <key>     # …or re-enter mid-step, at one recorded call
 retrace fork … --set k=v      # …serving v in place of the effect recorded at k
+retrace plan <run-id> --at N  # what that fork would replay, save and go stale on
 retrace resume <run-id>       # carry on a run that stopped early, from its log
 retrace stale <run-id>        # what moved under the steps it replayed, and to what
 retrace report <run-id>       # write the run as one self-contained HTML page
@@ -717,7 +786,9 @@ retrace fork demo-original --at 'step:2#2:search' --module ./agent-module.ts
 ```
 
 `--at` takes a step number, or an effect key as `show` prints it — see [forking
-inside a step](#forking-inside-a-step).
+inside a step](#forking-inside-a-step). `retrace plan` takes the same two
+options, executes none of it, and says what that fork would replay, save and go
+stale on — see [the fork you haven't run yet](#the-fork-you-havent-run-yet).
 
 Named exports and a `default` object both work. The file is imported for its exports, so it must not run anything at import time — see `examples/research.ts`, which guards its runner behind an entry-point check for exactly that reason. `--module` is optional for `replay`, and only matters there if the log stops short of the run it recorded.
 
@@ -1169,6 +1240,19 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 - **The digest behind `stale` covers what was asked, not the world.** For a model call that is the request: model, system prompt, tools, conversation, token and thinking settings — all of it, and each of them separately, so the log names which one moved rather than only that one did. For a tool call it is the input the model supplied, under the facet `input`. A tool that returns something different today because a database moved underneath it is not something either digest can see. Nor is the list itself a diff — a digest is one-way, so one log can say the system prompt changed and never what it changed to. Two can: [`retrace stale`](#what-a-replayed-step-is-still-answering) rebuilds both requests component by component from this run's log and its parent's, and reports the difference the digests could only point at. It needs the parent in the store, and says which component it could not account for when it isn't there.
 - **A tool call's digest is a check on the question, not on the tool.** It catches the case where a replayed tool call is handed the parent's answer to a call this run does not make — which happens when a model response above it was [replaced](#what-if-it-had-said-something-else), and essentially never otherwise. It says nothing about whether the recorded result is still what the tool would return — that question needs the tool rather than the log, and [`recheck`](#checking-a-log-against-the-world) is what asks it. Tool calls recorded before this existed carry no digest and are reported clean rather than guessed at, exactly as older model calls are.
 - **A log recorded before the per-component digests still compares, and still won't guess.** Staleness is decided by the whole-request digest, which has not changed, so an older log detects it exactly as before; it simply has no components to compare, and reports `stale` with nothing named rather than naming something it did not check.
+- **`plan` describes a fork without making it, and only from what the log
+  already holds.** It cuts the log where the fork will cut it, rebuilds the
+  requests the replayed prefix would be answering out of the run's own effects,
+  and compares them against the digests recorded beside the answers — so the
+  `stale` line it prints is the line the fork will print, arrived at for nothing.
+  What it cannot describe is anything above the fork point: the model has not
+  been asked, so what the live steps will call, what they will cost and whether
+  any of it is irreversible are in no log. The exception is a fork point inside a
+  step, where the turn that asked is replayed and the calls it asked for are
+  therefore already known — which is exactly the case the `irreversible` check
+  matters in. It is a prediction and not a promise: the world can move between
+  planning a fork and running one, and [`recheck`](#checking-a-log-against-the-world)
+  is the command that asks whether it has.
 - **`verify` checks the log against the log.** It proves that a fork's free
   prefix is the prefix its parent recorded, that following the chain up leads to
   a run that executed and was billed for it, that the money adds up to the
@@ -1221,7 +1305,7 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
 one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log, the `diff` comparison that holds two logs to the prefix they claim from the same source, and the `recheck` re-execution including its `unstable` finding, the watch on the
-ambient clock and RNG that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, and the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back — is covered by 345 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+ambient clock and RNG that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, and the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for — is covered by 361 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -1229,7 +1313,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 345 tests, no network, no API key
+npm test           # 361 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

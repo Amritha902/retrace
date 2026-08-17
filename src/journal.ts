@@ -176,7 +176,7 @@ export class Journal {
           value: entry.value as T,
           replayed: true,
           stale,
-          staleFacets: stale ? movedFacets(entry.stamp, stamp) : [],
+          staleFacets: stale ? movedFacets(entry.stamp?.facets, stamp?.facets) : [],
           overridden: entry.overridden === true,
           ambient: entry.ambient ?? [],
           durationMs: 0,
@@ -306,13 +306,17 @@ export class Journal {
  *
  * A facet on one side and not the other counts as moved: the component was
  * present in one request and absent from the other, which is a change. Empty
- * when either stamp carries no facets at all, because then nothing was compared
+ * when either side carries no facets at all, because then nothing was compared
  * — the caller has a stale effect it cannot explain, and saying so is the
  * truthful answer.
+ *
+ * Returned in whatever order the keys came in: the caller puts them in
+ * `orderFacets`' order, which lives with the facet names themselves.
  */
-function movedFacets(recorded: Stamp | undefined, offered: Stamp | undefined): string[] {
-  const was = recorded?.facets;
-  const now = offered?.facets;
+export function movedFacets(
+  was: Readonly<Record<string, string>> | undefined,
+  now: Readonly<Record<string, string>> | undefined,
+): string[] {
   if (was === undefined || now === undefined) return [];
   return [...new Set([...Object.keys(was), ...Object.keys(now)])].filter((n) => was[n] !== now[n]);
 }

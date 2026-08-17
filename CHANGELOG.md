@@ -30,6 +30,16 @@ publish contains rather than what changed since something.
   or random read is an error, since those resolve by key and are served wherever
   the run reaches them. The log records both `atStep` and `atEffect`, and
   `verify` holds the fork to the finer of the two.
+- **`planFork`.** What a fork would do, read off the log before any of it is
+  paid for: how many effects come out of the log and what they would not spend
+  again, which replayed calls would come back `stale` and on which components,
+  which tools the log says the run declared that the module does not, and which
+  calls in the fork point's own step a tool marks `irreversible`. It is derived
+  the way the fork derives it — the same cut, the same rebuilt requests, the same
+  recorded digests — so the `stale` line it prints is the line the fork will
+  print. Nothing executes; there is no provider to give it. Above the fork point
+  it describes nothing, because the model has not been asked yet, and without
+  tools it reports the staleness unpredicted rather than guessing at it.
 - **`resume`.** A run killed partway through is carried on from its log: the
   whole prefix replays and execution goes live at the effect the log ends on, so
   a process that died at step 9 of 12 finishes for the price of three steps. It
@@ -243,12 +253,16 @@ publish contains rather than what changed since something.
 
 ### The CLI
 
-`retrace ls`, `show`, `cost`, `diff`, `replay`, `fork`, `resume`, `stale`,
-`report`, `verify`, `recheck`, `export` and `import`.
+`retrace ls`, `show`, `cost`, `diff`, `replay`, `fork`, `plan`, `resume`,
+`stale`, `report`, `verify`, `recheck`, `export` and `import`.
 `replay` needs nothing but the log and exits non-zero if the run failed to
 reproduce, so it works as a regression check on the loop. `fork --module <path>`
 and `resume --module <path>` supply the half a log cannot hold — the tools, the
 provider, and any agent overrides.
+`plan <run-id> --at <n|effect-key> --module <path>` takes what `fork` takes,
+executes none of it, and prints what that fork would replay, save, go stale on
+and refuse to run twice; it exits non-zero only on the last of those, so it works
+as a pre-flight check in front of a fork.
 `--set <effect-key>=<value>`, on `fork` and `replay`, is the counterfactual.
 `stale <run-id>` reads the run against the one it replayed from and prints both
 sides of everything that moved under its free prefix.
@@ -280,7 +294,7 @@ depend on.
 
 ### Verified by
 
-328 tests that run with no network and no API key, plus two `[live]` integration
+361 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:

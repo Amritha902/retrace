@@ -1,4 +1,12 @@
-import { toolKey, type ToolUse } from "./agent.ts";
+import {
+  requestFacets,
+  requestFingerprint,
+  toolFacets,
+  toolFingerprint,
+  toolKey,
+  type ToolUse,
+} from "./agent.ts";
+import type { Stamp } from "./journal.ts";
 import { effectsOf } from "./replay.ts";
 import type {
   Message,
@@ -167,6 +175,20 @@ export function rebuildRequests(events: readonly RetraceEvent[]): RebuiltRequest
     unreached: effects.filter((e) => (e.kind === "model" || e.kind === "tool") && !reached.has(e)),
     ...(outcomeless === undefined ? {} : { outcomeless }),
   };
+}
+
+/**
+ * What the loop would have stamped a rebuilt call with, had it made it just now.
+ *
+ * The digest recorded beside an answer is the only thing that can say whether
+ * the answer was given to the question being asked, so everything that rebuilds
+ * a question has to take its digest exactly the way the loop took the recorded
+ * one. Taking it in two places is how the two come to disagree.
+ */
+export function stampOf(call: RebuiltCall): Required<Stamp> {
+  return call.kind === "model"
+    ? { hash: requestFingerprint(call.request), facets: requestFacets(call.request) }
+    : { hash: toolFingerprint(call.call), facets: toolFacets(call.call) };
 }
 
 /** The messages a log says the loop assembled, as it emitted them. */

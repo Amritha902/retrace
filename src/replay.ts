@@ -266,8 +266,12 @@ async function reenter(
  * the step execution went live in and `atEffect` narrows it to the effect
  * within that step when the caller asked for one. A reader that knows nothing
  * about effect fork points still learns something true from `atStep` alone.
+ *
+ * Exported because `planFork` describes this cut without making it, and a plan
+ * that cut the log anywhere but where the fork will is a plan of a different
+ * run.
  */
-function forkCut(
+export function forkCut(
   recorded: readonly RecordedEffect[],
   options: { atStep?: number; atEffect?: string },
 ): { entries: JournalEntry[]; origin: Pick<ForkOrigin, "atStep" | "atEffect"> } {

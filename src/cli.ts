@@ -6,6 +6,7 @@ import { collectBundle, importBundle, parseBundle, serializeBundle } from "./bun
 import { compareRuns, type EffectPair, type RunComparison } from "./compare.ts";
 import { explainStale } from "./explain.ts";
 import { loadRunModule, type RunModule } from "./module.ts";
+import { planFork } from "./plan.ts";
 import { formatUsd } from "./pricing.ts";
 import type { Overrides } from "./journal.ts";
 import {
@@ -36,6 +37,8 @@ const USAGE = `retrace — inspect and re-run recorded agent runs
   retrace replay <run-id>       re-run it from the log, and check it reproduces
   retrace fork <run-id> --at N  replay the steps below N, then run live
                                 (--at <effect-key> re-enters mid-step instead)
+  retrace plan <run-id> --at N  what that fork would replay, save and go stale
+                                on, before any of it is paid for
   retrace resume <run-id>       carry on a run that stopped early, from its log
   retrace stale <run-id>        say what moved under the steps it replayed, by
                                 reading the run it replayed them from
@@ -135,6 +138,8 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       return cmdReplay(io, store, rest[0], modulePath, reentry);
     case "fork":
       return cmdFork(io, store, rest[0], atRaw, modulePath, reentry);
+    case "plan":
+      return cmdPlan(io, store, rest[0], atRaw, modulePath, reentry);
     case "resume":
       return cmdResume(io, store, rest[0], modulePath, reentry);
     case "stale":
@@ -607,6 +612,127 @@ async function cmdFork(
   printStale(io, result.events);
   printAmbient(io, result.events);
   return result.status === "failed" ? 1 : 0;
+}
+
+/**
+ * The fork, described rather than made.
+ *
+ * `fork` tells you what a replayed prefix was still answering *after* it has run
+ * a live step to find out. Everything in that answer — the cut, the requests the
+ * prefix would be built against, the tools the module declares, the calls the
+ * fork point's own step would repeat — is in the log and the module beforehand.
+ * This says it beforehand, and executes nothing to do it.
+ */
+async function cmdPlan(
+  io: Io,
+  store: RunStore,
+  runId: string | undefined,
+  atRaw: string | undefined,
+  modulePath: string | undefined,
+  { overrides, allowIrreversible }: Reentry,
+): Promise<number> {
+  if (!runId) return fail(io, "plan needs a run id");
+  if (atRaw === undefined) {
+    return fail(io, "plan needs --at <step|effect-key>: the fork point it describes");
+  }
+  const at = readForkPoint(atRaw);
+  if (at === undefined) {
+    return fail(
+      io,
+      `--at takes a step number or an effect key, got "${atRaw}" — a key looks like ` +
+        `"step:2#0:search", as show prints it`,
+    );
+  }
+
+  const mod: RunModule = modulePath ? await loadRunModule(modulePath) : {};
+  const plan = planFork(runId, {
+    ...at,
+    // Absent rather than empty when there is no module: without the tools the
+    // fork would declare, what its prefix would be answering is not knowable,
+    // and the plan says so instead of reporting every step stale.
+    ...(mod.tools === undefined ? {} : { tools: mod.tools }),
+    agent: mod.agent,
+    input: mod.input,
+    overrides,
+    allowIrreversible,
+    store,
+  });
+
+  io.out(`${bold(runId)}  ${statusLabel(plan.status)}\n`);
+  io.out(
+    dim(
+      `${plan.agent.name} · ${plan.agent.model} · fork at ${plan.atEffect ?? `step ${plan.atStep}`}\n\n`,
+    ),
+  );
+
+  const line = (label: string, text: string): void =>
+    io.out(`  ${padLabel(label, 9)} ${text}\n`);
+
+  line(
+    green("replays"),
+    `${plan.replayed} of ${plural(plan.recorded, "effect")}` +
+      `${plan.replayedSteps > 0 ? `, ${plural(plan.replayedSteps, "step")} whole` : ""}` +
+      dim(` · ${formatUsd(plan.savedUsd)} of ${formatUsd(plan.costUsd)} not spent again`),
+  );
+  line(
+    yellow("live"),
+    plan.atEffect === undefined
+      ? dim(`step ${plan.atStep} onward: the model call, and whatever it asks for`)
+      : dim(
+          `${plan.atEffect} onward: ${plural(plan.live.length, "recorded tool call")}` +
+            `, then whatever the step after it asks for`,
+        ),
+  );
+
+  if (plan.blocked !== undefined) {
+    line(dim("stale"), dim(plan.blocked));
+  } else if (plan.stale.length === 0) {
+    line(green("stale"), dim("nothing: the prefix answers the requests this fork would build"));
+  } else {
+    for (const kind of ["model", "tool"] as const) {
+      const these = plan.stale.filter((s) => s.kind === kind);
+      if (these.length === 0) continue;
+      const moved = orderFacets(these.flatMap((s) => s.facets));
+      line(
+        yellow("stale"),
+        `${plural(these.length, `replayed ${kind} call`)} ` +
+          dim(
+            kind === "model"
+              ? "would answer a request this fork no longer builds"
+              : "would be given the answer to a different call",
+          ) +
+          // Which components moved is the actionable half, exactly as it is
+          // after a fork: one you meant to change is the fork working, and a
+          // second one beside it is a module that is not the run's.
+          dim(moved.length > 0 ? ` — ${moved.join(", ")}` : ""),
+      );
+      line("", dim(these.map((s) => s.key).join(", ")));
+    }
+  }
+  if (plan.undigested > 0) {
+    line(dim("undigested"), dim(`${plural(plan.undigested, "call")} carries no request digest`));
+  }
+  if (plan.undeclared.length > 0) {
+    line(
+      yellow("tools"),
+      `the log declares ${plan.undeclared.map((n) => `"${n}"`).join(", ")}` +
+        dim(", and this module does not — a live step that asks for one would fail"),
+    );
+  }
+  for (const call of plan.held) {
+    line(
+      red("held"),
+      `"${call.tool}" at ${call.key} is marked irreversible` +
+        dim(" — this fork would stop there rather than make the call again"),
+    );
+  }
+
+  io.out(
+    plan.held.length > 0
+      ? `\n${red("would not run")}: fork above ${plan.held[0]!.key} to replay it instead, or pass --allow-irreversible\n`
+      : `\n${dim("nothing ran: this is the fork read off the log, before you pay for it")}\n`,
+  );
+  return plan.held.length > 0 ? 1 : 0;
 }
 
 /**
