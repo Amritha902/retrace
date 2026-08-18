@@ -554,9 +554,28 @@ What keeps this from being a cache that lies: the key carries a digest of the
 request as well as the slot. `step:0#0:search/fetch:0:5d8f110cfaa9` is the first
 fetch of that call *asking that question*, so a live call asking something else
 finds nothing there and goes to the network, rather than being handed the
-parent's answer to a question it did not ask. Method, URL and a text body are
-what that digest covers; a stream or a blob body is not, and two calls differing
-only there share a slot.
+parent's answer to a question it did not ask.
+
+A request that *writes* asks its question in the body, so the body is recorded
+beside the method and the URL and folded into that digest — as text where it is
+text and base64 where it isn't, exactly like a response:
+
+```
+  live      fetch  step:1#0:index/fetch:0:a3f0921cb45e  61ms
+        → POST https://corpus.internal/index (86B) → 201 (7B)
+```
+
+A string, form parameters, bytes and a `Blob` can all be read twice, so reading
+one to digest it leaves the fetch below exactly the request it was given. A
+`ReadableStream` cannot, and `FormData` has no stable bytes to record — its
+boundary is generated per request — so both are recorded as `unread` rather than
+drained or guessed at: the journal observes a request, it does not rewrite one.
+That slot cannot collide with the bodyless call to the same URL, only with
+another unread one, and the line a person reads says which it is.
+
+Headers are deliberately outside the digest. A request id, a trace header or a
+token reissued between runs would move the slot on every call and send a replay
+to the network for all of them.
 
 The other half is the tools that don't use it. `fetch` is watched exactly as the
 clock and the RNG are, so a tool that reaches for the global one is recorded with
@@ -1252,7 +1271,7 @@ it is `recheckRun(runId, { tools })`.
 
 Runs are JSONL under `.retrace/runs/<run-id>.jsonl`, one event per line, appended synchronously. If the process dies mid-run the log is still a truthful prefix — a torn final line is dropped on read, and everything before it stands — and a truthful prefix is enough to [pick the run back up](#picking-a-run-back-up). `MemoryStore` is the same interface with nothing on disk.
 
-The log holds normalized, provider-agnostic content, plus the provider's own blocks verbatim (thinking blocks are signed and have to be echoed back byte-for-byte). A response a tool fetched through `ctx.fetch` is flattened into the parts a tool can read back out — status, status text, headers and body — because a `Response` is a one-shot stream over a socket that is closed long before anyone replays it. A run recorded today still replays after the SDK's types change underneath it. It also holds the tool declarations the run was recorded with, as the model was shown them — the agent spec carries the model and the prompt but never those, and without them a `stale (tools)` marking is the one staleness nothing could follow up.
+The log holds normalized, provider-agnostic content, plus the provider's own blocks verbatim (thinking blocks are signed and have to be echoed back byte-for-byte). A response a tool fetched through `ctx.fetch` is flattened into the parts a tool can read back out — status, status text, headers and body — because a `Response` is a one-shot stream over a socket that is closed long before anyone replays it. The request that asked for it is flattened the same way, method, URL and body, so a `POST` in the log says what was posted rather than only where. A run recorded today still replays after the SDK's types change underneath it. It also holds the tool declarations the run was recorded with, as the model was shown them — the agent spec carries the model and the prompt but never those, and without them a `stale (tools)` marking is the one staleness nothing could follow up.
 
 ## Determinism, honestly
 
@@ -1274,10 +1293,14 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   answers stop depending on a corpus that has moved since. What it covers is
   `fetch`: a tool reaching the network through a native client, a database
   driver or a subprocess is outside it, and comes back marked only where the
-  global `fetch` is what it used. Its slot carries a digest of method, URL and
-  a text body, so a call asking something else goes live rather than being
-  handed the wrong answer — but a request that differs only in a stream or a
-  blob body shares a slot with the one recorded there. And a recorded response
+  global `fetch` is what it used. Its slot carries a digest of the method, the
+  URL and the body, so a call asking something else goes live rather than being
+  handed the wrong answer — but the body has to be one that can be read twice
+  for that to hold. A `ReadableStream` body cannot be read without taking it
+  from the fetch about to send it, and `FormData` has no stable bytes to digest,
+  so both are recorded `unread` and two calls differing only there share a slot.
+  Headers are outside the digest on purpose: a trace header or a reissued token
+  would move every slot and send a whole replay to the network. And a recorded response
   is a snapshot of what the corpus said then: that is the point on a fork, and
   it is exactly what [`recheck`](#checking-a-log-against-the-world) refuses to
   serve, since asking whether it still holds is the one thing that command is
@@ -1393,8 +1416,8 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 ## Status
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
-one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads inside the boundary, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log, the `diff` comparison that holds two logs to the prefix they claim from the same source, and the `recheck` re-execution including its `unstable` finding, the watch on the
-ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, and the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for — is covered by 376 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads — what it asked, body and all, and what came back — inside the boundary, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log, the `diff` comparison that holds two logs to the prefix they claim from the same source, and the `recheck` re-execution including its `unstable` finding, the watch on the
+ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, and the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for — is covered by 381 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -1402,7 +1425,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 376 tests, no network, no API key
+npm test           # 381 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

@@ -4,7 +4,6 @@ import { realNow, realRandom, unwatched, watchAmbient, type AmbientSource } from
 import { Budget } from "./budget.ts";
 import { BudgetExceededError, IrreversibleToolError, ToolNotFoundError } from "./errors.ts";
 import {
-  bodyDigestOf,
   captureFetch,
   captureFetchFailure,
   fetchSlot,
@@ -694,7 +693,7 @@ function toolContext(step: number, ownerKey: string, take: Take): ToolContext {
     uuid: () => at("uuid", () => randomUUID()),
     random: () => at("random", realRandom),
     fetch: async (input, init) => {
-      const request = requestOf(input, init);
+      const request = await requestOf(input, init);
       const recorded = await at<RecordedFetch>(
         "fetch",
         async () => {
@@ -708,7 +707,7 @@ function toolContext(step: number, ownerKey: string, take: Take): ToolContext {
             return captureFetchFailure(request, cause);
           }
         },
-        `:${fetchSlot(request, bodyDigestOf(init))}`,
+        `:${fetchSlot(request)}`,
       );
       return rebuildResponse(recorded);
     },

@@ -347,6 +347,272 @@ test("a live tail asking something else finds no answer in that slot and goes to
   assert.equal((asked.value as RecordedFetch).request.url, "https://corpus.test/search?q=gamma");
 });
 
+/**
+ * A `fetch` that records what it was actually handed to send.
+ *
+ * Everything below is about a request's body, and the two things worth checking
+ * about one are that the log holds it and that reading it left the fetch the
+ * bytes it was given — a journal that digested a body by consuming it would
+ * send an empty one.
+ */
+function stubSends(answer: (url: string) => Response) {
+  const sent: Array<{ method: string; url: string; bytes: Uint8Array }> = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    const url = String(input);
+    const bytes = new Uint8Array(await new Request(url, init).arrayBuffer());
+    sent.push({ method: init?.method ?? "GET", url, bytes });
+    return answer(url);
+  }) as typeof globalThis.fetch;
+  return {
+    sent,
+    restore: () => {
+      globalThis.fetch = real;
+    },
+  };
+}
+
+/** Two steps of writing, so a fork at step 1 has one live call to make. */
+function writes(...queries: string[]) {
+  return [
+    ...queries.map((query, i) => ({ content: [toolUse(`t${i}`, "index", { query })] })),
+    { content: [text("written")] },
+  ];
+}
+
+/** A tool that writes to the corpus, at one URL, with the body it is given. */
+function postTool(bodyFor: (query: string) => BodyInit) {
+  return tool({
+    name: "index",
+    description: "Write a term to the corpus. Call this when the answer should be written down.",
+    inputSchema: objectSchema({ query: { type: "string" } }),
+    run: async (input: { query: string }, ctx: ToolContext) => {
+      const r = await ctx.fetch("https://corpus.test/index", {
+        method: "POST",
+        body: bodyFor(input.query),
+      });
+      return `${r.status} ${await r.text()}`;
+    },
+  });
+}
+
+test("what a POST sent is in the log, not just where it was sent", async () => {
+  const store = new MemoryStore();
+  const stub = stubSends(() => new Response("written", { status: 201, statusText: "Created" }));
+  try {
+    await run("write to the corpus", {
+      agent,
+      provider: new MockProvider(writes("alpha")),
+      tools: [postTool((query) => JSON.stringify({ query }))],
+      store,
+      runId: "write",
+    });
+  } finally {
+    stub.restore();
+  }
+
+  // Without the body the line reads "POST /index → 201", which says the run
+  // wrote something to the corpus and never what.
+  const value = fetches(store.read("write"))[0]?.value as RecordedFetch;
+  assert.deepEqual(value.request, {
+    method: "POST",
+    url: "https://corpus.test/index",
+    body: '{"query":"alpha"}',
+  });
+  assert.equal(
+    describeFetch(value),
+    "POST https://corpus.test/index (17B) → 201 (7B)",
+  );
+});
+
+test("a body that is not a string is read for the log, and still reaches the fetch", async () => {
+  const bytes = new Uint8Array([0xff, 0x00, 0x10]);
+  const shapes: Array<[string, BodyInit, { body: string; base64?: true }]> = [
+    ["a string", "q=alpha", { body: "q=alpha" }],
+    ["form parameters", new URLSearchParams({ q: "alpha" }), { body: "q=alpha" }],
+    ["a blob", new Blob(["q=alpha"]), { body: "q=alpha" }],
+    ["bytes", bytes, { body: Buffer.from(bytes).toString("base64"), base64: true }],
+  ];
+
+  for (const [what, body, held] of shapes) {
+    const store = new MemoryStore();
+    const stub = stubSends(() => new Response("written", { status: 201 }));
+    try {
+      await run("write to the corpus", {
+        agent,
+        provider: new MockProvider(writes("alpha")),
+        tools: [postTool(() => body)],
+        store,
+        runId: "write",
+      });
+    } finally {
+      stub.restore();
+    }
+
+    const value = fetches(store.read("write"))[0]?.value as RecordedFetch;
+    assert.deepEqual(
+      { body: value.request.body, ...(value.request.base64 ? { base64: true } : {}) },
+      held,
+      what,
+    );
+    // Reading a body to digest it must not consume it: a string, form
+    // parameters, a blob and bytes can all be read twice, which is why these
+    // are the shapes the journal reads at all.
+    assert.deepEqual([...(stub.sent[0]?.bytes ?? [])], [...(await new Response(body).bytes())], what);
+  }
+});
+
+test("a live tail sending different bytes is not handed the parent's response", async () => {
+  // One URL, two bodies: the slot is the same and the request is not, so the
+  // digest in the key is the only thing standing between a fork's live call and
+  // the parent's answer to a question it did not ask.
+  const encode = (query: string) => new TextEncoder().encode(`q=${query}`);
+
+  async function forkWith(query: string, runId: string, store: RunStore) {
+    const stub = stubSends(() => new Response(`written ${query}`, { status: 201 }));
+    try {
+      return {
+        forked: await fork("write", {
+          provider: new MockProvider([
+            { content: [toolUse("t1", "index", { query })] },
+            { content: [text("written")] },
+          ]),
+          atStep: 1,
+          tools: [postTool(encode)],
+          store,
+          runId,
+        }),
+        sent: [...stub.sent],
+      };
+    } finally {
+      stub.restore();
+    }
+  }
+
+  const store = new MemoryStore();
+  const stub = stubSends(() => new Response("written", { status: 201 }));
+  try {
+    await run("write to the corpus", {
+      agent,
+      provider: new MockProvider(writes("alpha", "beta")),
+      tools: [postTool(encode)],
+      store,
+      runId: "write",
+    });
+  } finally {
+    stub.restore();
+  }
+
+  const same = await forkWith("beta", "same-bytes", store);
+  assert.deepEqual(same.sent, []);
+  assert.deepEqual(
+    fetches(same.forked.events).map((e) => e.value),
+    fetches(store.read("write")).map((e) => e.value),
+  );
+
+  const other = await forkWith("gamma", "other-bytes", store);
+  assert.deepEqual(other.sent.map((s) => new TextDecoder().decode(s.bytes)), ["q=gamma"]);
+  const [live] = fetches(other.forked.events).filter((e) => !e.replayed);
+  assert.equal((live?.value as RecordedFetch).request.body, "q=gamma");
+});
+
+test("a body the journal cannot read without taking it is recorded as unread", async () => {
+  const streaming = tool({
+    name: "index",
+    description: "Write a term to the corpus. Call this when the answer should be written down.",
+    inputSchema: objectSchema({ query: { type: "string" } }),
+    run: async (input: { query: string }, ctx: ToolContext) => {
+      const body = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`q=${input.query}`));
+          controller.close();
+        },
+      });
+      const r = await ctx.fetch("https://corpus.test/index", {
+        method: "POST",
+        body,
+        duplex: "half",
+      } as RequestInit);
+      return `${r.status} ${await r.text()}`;
+    },
+  });
+
+  const store = new MemoryStore();
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => new Response("written", { status: 201 })) as typeof globalThis.fetch;
+  try {
+    await run("write to the corpus", {
+      agent,
+      provider: new MockProvider(writes("alpha")),
+      tools: [streaming],
+      store,
+      runId: "streamed",
+    });
+  } finally {
+    globalThis.fetch = real;
+  }
+
+  // Draining the stream would have left the fetch below nothing to send, so the
+  // log says it did not read the body rather than recording an empty one — and
+  // says it on the line a person reads.
+  const value = fetches(store.read("streamed"))[0]?.value as RecordedFetch;
+  assert.deepEqual(value.request, {
+    method: "POST",
+    url: "https://corpus.test/index",
+    unread: true,
+  });
+  assert.equal(
+    describeFetch(value),
+    "POST https://corpus.test/index (body not read) → 201 (7B)",
+  );
+
+  // It is still a stable slot, so the run replays without reaching the network.
+  const again = await replay("streamed", {
+    provider: new MockProvider([]),
+    tools: [streaming],
+    store,
+  });
+  assert.equal(again.status, "completed");
+  assert.deepEqual(fetches(again.events).map((e) => e.replayed), [true]);
+});
+
+test("a Request carrying its own body is read through a clone, and still sends it", async () => {
+  const posting = tool({
+    name: "index",
+    description: "Write a term to the corpus. Call this when the answer should be written down.",
+    inputSchema: objectSchema({ query: { type: "string" } }),
+    run: async (input: { query: string }, ctx: ToolContext) => {
+      const r = await ctx.fetch(
+        new Request("https://corpus.test/index", { method: "POST", body: `q=${input.query}` }),
+      );
+      return `${r.status} ${await r.text()}`;
+    },
+  });
+
+  const store = new MemoryStore();
+  const sent: string[] = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (input: unknown) => {
+    sent.push(await (input as Request).text());
+    return new Response("written", { status: 201 });
+  }) as typeof globalThis.fetch;
+  try {
+    await run("write to the corpus", {
+      agent,
+      provider: new MockProvider(writes("alpha")),
+      tools: [posting],
+      store,
+      runId: "request-body",
+    });
+  } finally {
+    globalThis.fetch = real;
+  }
+
+  const value = fetches(store.read("request-body"))[0]?.value as RecordedFetch;
+  assert.equal(value.request.body, "q=alpha");
+  assert.deepEqual(sent, ["q=alpha"]);
+});
+
 test("a tool that fetches around ctx is marked, and verify's ambient check fails on it", async () => {
   const store = new MemoryStore();
   const stub = stubFetch(() => json({ hits: "results for alpha" }));

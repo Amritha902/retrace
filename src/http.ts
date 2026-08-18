@@ -10,7 +10,7 @@ import { fingerprint } from "./store.ts";
  * input: without it the line says `200` and not what it is 200 *to*.
  */
 export interface RecordedFetch {
-  request: { method: string; url: string };
+  request: RecordedRequest;
   status: number;
   statusText: string;
   headers: Record<string, string>;
@@ -27,6 +27,30 @@ export interface RecordedFetch {
 }
 
 /**
+ * What a call to `ctx.fetch` is asking, as the log records it.
+ *
+ * The body is here for the same reason the response body is: a `POST` recorded
+ * as its method and its URL says the run charged something and never what, and
+ * the slot it is served from is a digest of this — so a request the log cannot
+ * hold is a request the key cannot tell apart from another.
+ */
+export interface RecordedRequest {
+  method: string;
+  url: string;
+  /** The body, as text where the bytes are text and base64 where they aren't. */
+  body?: string;
+  /** Set when `body` is base64 rather than the bytes themselves. */
+  base64?: true;
+  /**
+   * Set when there was a body and reading it would have taken it from the
+   * fetch about to send it. The journal observes a request; it does not rewrite
+   * one, so a stream stays the caller's to send and the log says it did not
+   * read it rather than recording an empty body.
+   */
+  unread?: true;
+}
+
+/**
  * What `fetch` accepts as its first argument. Spelled out rather than taken
  * from `RequestInfo`, which is a DOM name and not in the libs this compiles
  * against.
@@ -34,11 +58,14 @@ export interface RecordedFetch {
 export type FetchInput = string | URL | Request;
 
 /** What a call to `ctx.fetch` is asking, as the log records it. */
-export function requestOf(input: FetchInput, init?: RequestInit): RecordedFetch["request"] {
+export async function requestOf(
+  input: FetchInput,
+  init?: RequestInit,
+): Promise<RecordedRequest> {
   const url =
     typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
   const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
-  return { method, url };
+  return { method, url, ...(await readBody(input, init)) };
 }
 
 /**
@@ -51,18 +78,53 @@ export function requestOf(input: FetchInput, init?: RequestInit): RecordedFetch[
  * rather than a stale one. Folding the request into the key means a matching
  * call is served from the log and a different one simply finds no entry there
  * and goes to the network, which is the behaviour you would want either way.
+ *
+ * Headers are deliberately not in it. A request id, a trace header or a token
+ * that is reissued between runs would move the slot on every call and send a
+ * replay to the network for all of them, which costs the guarantee to catch a
+ * difference that rarely changes the answer.
  */
-export function fetchSlot(request: RecordedFetch["request"], body: string | undefined): string {
-  return `${fingerprint({ ...request, body: body ?? null })}`;
+export function fetchSlot(request: RecordedRequest): string {
+  return fingerprint({
+    method: request.method,
+    url: request.url,
+    body: request.body ?? null,
+    ...(request.base64 ? { base64: true } : {}),
+    ...(request.unread ? { unread: true } : {}),
+  });
 }
 
 /**
- * The body of a request, where it is text. Anything else — a stream, a blob,
- * form data — is left out of the digest rather than guessed at, so two calls
- * that differ only in such a body share a slot. `ctx.fetch` says so.
+ * The body a call is sending, where it is something that can be read without
+ * consuming it.
+ *
+ * A string, a `URLSearchParams`, bytes and a `Blob` can all be read twice, so
+ * reading one here leaves the fetch below exactly the request it was given. A
+ * stream cannot, and form data has no stable bytes to record — the boundary is
+ * generated per request — so both are marked `unread` instead. That is still
+ * worth recording: a slot carrying `unread` cannot collide with the bodyless
+ * call to the same URL, only with another unread one.
  */
-export function bodyDigestOf(init: RequestInit | undefined): string | undefined {
-  return typeof init?.body === "string" ? init.body : undefined;
+async function readBody(
+  input: FetchInput,
+  init: RequestInit | undefined,
+): Promise<Partial<RecordedRequest>> {
+  const given = init?.body;
+  if (given === undefined) {
+    // No body in `init` means the one on the `Request`, if there is one. Reading
+    // it needs a clone, which tees the stream and leaves the original sendable.
+    if (input instanceof Request && input.body)
+      return encodeBody(new Uint8Array(await input.clone().arrayBuffer()));
+    return {};
+  }
+  if (given === null) return {};
+  if (typeof given === "string") return { body: given };
+  if (given instanceof URLSearchParams) return { body: given.toString() };
+  if (given instanceof Blob) return encodeBody(new Uint8Array(await given.arrayBuffer()));
+  if (given instanceof ArrayBuffer) return encodeBody(new Uint8Array(given));
+  if (ArrayBuffer.isView(given))
+    return encodeBody(new Uint8Array(given.buffer, given.byteOffset, given.byteLength));
+  return { unread: true };
 }
 
 /** Drain a live response into something the log can hold. */
@@ -126,10 +188,24 @@ export function rebuildResponse(recorded: RecordedFetch): Response {
 
 /** How a fetch reads in `show` and in the HTML report. */
 export function describeFetch(recorded: RecordedFetch): string {
-  const what = `${recorded.request.method} ${recorded.request.url}`;
+  const what = `${recorded.request.method} ${recorded.request.url}${describeSent(recorded.request)}`;
   if (recorded.error) return `${what} → ${recorded.error.name}: ${recorded.error.message}`;
-  const size = recorded.base64 ? "" : ` (${recorded.body.length}B)`;
-  return `${what} → ${recorded.status}${size}`;
+  return `${what} → ${recorded.status}${sizeOf(recorded)}`;
+}
+
+/** What a request carried, at the size the timeline has room for. */
+function describeSent(request: RecordedRequest): string {
+  if (request.unread) return " (body not read)";
+  if (request.body === undefined) return "";
+  return sizeOf(request as { body: string; base64?: true });
+}
+
+/** A body as a byte count, so the two halves of the line mean the same thing. */
+function sizeOf(held: { body: string; base64?: true }): string {
+  const bytes = held.base64
+    ? Buffer.from(held.body, "base64").length
+    : Buffer.byteLength(held.body);
+  return ` (${bytes}B${held.base64 ? " binary" : ""})`;
 }
 
 /**

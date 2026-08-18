@@ -65,9 +65,16 @@ publish contains rather than what changed since something.
   than by position, like the clock and the RNG, which means the live tail of a
   fork sees the world its parent saw and differs from it only in what you
   changed. What keeps that from being a cache that lies is a digest of the
-  method, URL and text body folded into the key: a call asking something else
+  method, URL and body folded into the key: a call asking something else
   finds nothing in that slot and goes to the network rather than being handed
-  the wrong answer. `recheck` is the deliberate exception and does not serve
+  the wrong answer. The request is flattened into the log the same way the
+  response is, body and all, so a `POST` says what was posted rather than only
+  where — a string, form parameters, bytes and a `Blob` can each be read twice,
+  so digesting one leaves the fetch below the request it was given, while a
+  `ReadableStream` and `FormData` are recorded `unread` rather than drained or
+  guessed at. Headers are outside the digest on purpose: a trace header or a
+  reissued token would move every slot and send a whole replay to the network.
+  `recheck` is the deliberate exception and does not serve
   recorded responses — whether the world still says what the log holds is the
   question it exists to ask — so its network reads go live while the clock, the
   ids and the randomness stay pinned, leaving the network as the only thing a
