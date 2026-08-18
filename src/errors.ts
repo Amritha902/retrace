@@ -9,13 +9,26 @@ export class BudgetExceededError extends RetraceError {
   readonly totals: Totals;
 
   constructor(limit: keyof BudgetSpec, allowed: number, attempted: number, totals: Totals) {
-    super(`budget exceeded: ${limit} limit is ${allowed}, this step would reach ${round(attempted)}`);
+    super(`${budgetLimitReached(limit, allowed)}, this step would reach ${round(attempted)}`);
     this.name = "BudgetExceededError";
     this.limit = limit;
     this.allowed = allowed;
     this.attempted = attempted;
     this.totals = totals;
   }
+}
+
+/**
+ * Which limit stopped a run, and what it was set to.
+ *
+ * The head of the message rather than the whole of it, because the tail says how
+ * far past the limit the run would have gone and only the run itself knows that.
+ * `verify` builds this from the budget a log declares and requires the error the
+ * log reports to start with one of them — a run cannot have exceeded a limit it
+ * never set.
+ */
+export function budgetLimitReached(limit: keyof BudgetSpec, allowed: number): string {
+  return `budget exceeded: ${limit} limit is ${allowed}`;
 }
 
 /**

@@ -939,6 +939,8 @@ forked from demo-original at step 3
 
   ok   shape        24 events, 7 effects, indices dense and in order
   ok   requests     7 calls answer the request this log rebuilds, digest for digest
+  ok   conclusion   completed on "Large market. Crowded. Per-seat pricing.", which is
+                    the response the log ends on
   ok   accounting   $0.9200 at list price, $0.2300 billed, $0.6900 saved — the charges add up
   ok   free replay  6 of 7 effects came out of the log, and none of them was billed
   ok   markings     3 stale (system), 0 substituted, all of them served from the log
@@ -1041,6 +1043,36 @@ A check it cannot run — a lineage that leaves this store, a killed run with no
 totals yet — comes back skipped rather than passed, traced as far as it goes, and
 the last line says how much of the verification that leaves undone. In code it is
 `verifyRun(runId)`.
+
+### The line a person actually reads
+
+Every check above walks the effects. None of them reads the last line of the
+log — the one carrying what the run answered and how it ended — which is the
+line `show` prints, `diff` quotes when it says two forks ended differently, and
+the only part of a run most people ever look at. Rewrite it and `requests` still
+rebuilds every request, `accounting` still adds up, `parent` and `lineage` still
+trace the prefix home. A log that verifies clean, reporting an answer nobody
+gave.
+
+`conclusion` is that line held to the rest of the log, and it needs nothing
+outside it, because the loop derives its ending rather than deciding one:
+
+```
+  fail conclusion   the run reports its answer as "…and a third thing", and the text
+                    of the response it ends on is "alpha and beta, explained"
+```
+
+The answer is the text of the last model response, so a `completed` run has to
+report that response's words, a `refused` run reports no answer at all, and a run
+that died or ran out of steps or money carries the last thing the model actually
+said. The status has a shape too: a run cannot complete on a turn that asked for
+tool calls the log never carries out, cannot claim it used every step its agent
+allows when the log starts fewer, cannot report a limit its own budget never
+declared, and cannot report a failure other than the one the call it died on
+recorded.
+
+What it cannot say is whether the answer was any good, or whether the model
+should have given it. It says the run reported the ending it had.
 
 ### Taking a lineage with you
 
@@ -1374,6 +1406,16 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   leaves the store is traced to that point and reported skipped, not passed —
   which is a fact about the store rather than about the run, and
   [`export`](#taking-a-lineage-with-you) is how you hand it the rest.
+- **`verify` also holds a log's last line to the rest of it.** `conclusion`
+  compares the answer a run reports against the text of the model response its
+  own log ends on, and the status it reports against the shape of that ending —
+  a completed run's turn asked for no tools, a refusal carries no answer, a run
+  out of steps used every step its agent allows, a budget stop names a limit its
+  budget declared, a failure carries the message the call it died on recorded.
+  Nothing else here reads that line, which made it the one field a doctored log
+  could rewrite and still verify clean. It says nothing about whether the answer
+  was right — only that it is the answer the log arrived at — and a log with no
+  `run.finished` event yet is skipped rather than passed.
 - **One of `verify`'s checks holds a log to itself rather than to another log.**
   `requests` rebuilds every request the run made out of the run's own effects and
   compares it against the digest recorded beside each answer, which is what makes
@@ -1416,8 +1458,8 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 ## Status
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
-one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads — what it asked, body and all, and what came back — inside the boundary, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log, the `diff` comparison that holds two logs to the prefix they claim from the same source, and the `recheck` re-execution including its `unstable` finding, the watch on the
-ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, and the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for — is covered by 381 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads — what it asked, body and all, and what came back — inside the boundary, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log and the `conclusion` check that holds a run's reported answer and ending to the response its log ends on, the `diff` comparison that holds two logs to the prefix they claim from the same source, and the `recheck` re-execution including its `unstable` finding, the watch on the
+ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, and the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for — is covered by 399 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -1425,7 +1467,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 381 tests, no network, no API key
+npm test           # 399 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

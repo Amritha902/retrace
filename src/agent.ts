@@ -344,9 +344,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
 
       if (response.stopReason === "refusal") {
         status = "refused";
-        error = `the model declined this request${
-          response.refusalCategory ? ` (${response.refusalCategory})` : ""
-        }`;
+        error = refusalError(response);
         break;
       }
 
@@ -356,7 +354,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
 
       if (toolUses.length === 0) {
         status = "completed";
-        output = textOf(response.content);
+        output = answerText(response.content);
         break;
       }
 
@@ -530,7 +528,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
 
     if (status === "running") {
       status = "max_steps";
-      error = `stopped after ${agent.maxSteps} steps without a final answer`;
+      error = exhaustedError(agent.maxSteps);
       output = lastAssistantText(messages);
     }
   } catch (cause) {
@@ -782,7 +780,16 @@ function fragmentsOf(content: ContentBlock[]): StreamDelta[] {
   });
 }
 
-function textOf(content: ContentBlock[]): string {
+/**
+ * The words a turn amounts to: its text blocks, joined and trimmed.
+ *
+ * Exported because the loop is not the only thing that has to know how a run
+ * arrives at its answer. `verify` holds the answer written into a log against
+ * the model response the same log ends on, and two implementations of "the text
+ * of a turn" would eventually disagree about a run neither of them was wrong
+ * about — the same reason `stampOf` takes its digests from here.
+ */
+export function answerText(content: ContentBlock[]): string {
   return content
     .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
     .map((b) => b.text)
@@ -790,10 +797,22 @@ function textOf(content: ContentBlock[]): string {
     .trim();
 }
 
+/** Why a run stopped when the model declined it. Shared with `verify`, as `answerText` is. */
+export function refusalError(response: ModelResponse): string {
+  return `the model declined this request${
+    response.refusalCategory ? ` (${response.refusalCategory})` : ""
+  }`;
+}
+
+/** Why a run stopped having used every step it was allowed. */
+export function exhaustedError(maxSteps: number): string {
+  return `stopped after ${maxSteps} steps without a final answer`;
+}
+
 function lastAssistantText(messages: Message[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
-    if (m?.role === "assistant") return textOf(m.content);
+    if (m?.role === "assistant") return answerText(m.content);
   }
   return "";
 }

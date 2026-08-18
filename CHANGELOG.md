@@ -219,6 +219,23 @@ publish contains rather than what changed since something.
   it was made. A log written before runs recorded their tool declarations, or
   before the digests existed at all, comes back skipped rather than reported as
   edited.
+- **`verify`'s `conclusion` check.** The last line of a log — what the run
+  answered and how it ended — held to the rest of it. Every other check walks
+  the effects and stops there, so rewriting `run.finished` used to leave a log
+  that verified clean while reporting an answer nobody gave; it is also the line
+  `show` prints, `diff` quotes when it says two forks ended differently, and the
+  only part of a run most people read. The loop derives its ending rather than
+  deciding one, so it can be derived again: the answer is the text of the last
+  model response, a refusal carries none at all, and a run that died or ran out
+  of steps or money carries the last thing the model actually said. The status
+  has a shape too — a `completed` run's final turn asked for no tool calls, a
+  `max_steps` run started every step its agent allows, a `budget_exceeded` run
+  names a limit its own budget declared, and a `failed` run reports the message
+  the call it died on recorded. It needs no store, no parent and no network, and
+  a log with no `run.finished` event yet is skipped rather than passed. The
+  answer text, the refusal message and the out-of-steps message now come from
+  `answerText`, `refusalError` and `exhaustedError` in the loop, so the check
+  and the run it checks cannot drift apart.
 - **`compareRuns(a, b)`.** Two runs lined up effect by effect, and held to the
   stretch of them they are not free to disagree on. A run's leading replayed
   effects came out of another log at that log's own indices, so two runs that
@@ -321,7 +338,7 @@ depend on.
 
 ### Verified by
 
-361 tests that run with no network and no API key, plus two `[live]` integration
+399 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:

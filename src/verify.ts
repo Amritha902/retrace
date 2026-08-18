@@ -1,10 +1,18 @@
-import { orderFacets } from "./agent.ts";
+import { answerText, exhaustedError, orderFacets, refusalError } from "./agent.ts";
+import { budgetLimitReached } from "./errors.ts";
 import { movedFacets } from "./journal.ts";
 import { formatUsd } from "./pricing.ts";
 import { rebuildRequests, recordedMessages, stampOf } from "./rebuild.ts";
 import { effectsOf } from "./replay.ts";
 import { fingerprint, RunStore } from "./store.ts";
-import { ZERO_USAGE, type ForkOrigin, type RetraceEvent, type Usage } from "./types.ts";
+import {
+  ZERO_USAGE,
+  type BudgetSpec,
+  type ForkOrigin,
+  type ModelResponse,
+  type RetraceEvent,
+  type Usage,
+} from "./types.ts";
 
 type Effect = Extract<RetraceEvent, { type: "effect" }>;
 
@@ -46,6 +54,10 @@ export interface VerifyReport {
  * `requests` asks the one neither of them can, because both compare a log with
  * another log: whether a log's answers are answers to its own questions. That is
  * what makes the run at the top of a lineage checkable at all.
+ *
+ * `conclusion` holds the last line to the rest — the answer a run reports
+ * against the response its own log ends on, and the status against the shape of
+ * that ending.
  */
 export function verifyRun(runId: string, store: RunStore = new RunStore()): VerifyReport {
   return verifyEvents(runId, store.read(runId), store);
@@ -66,6 +78,7 @@ export function verifyEvents(
   const checks = [
     checkShape(events),
     checkRequests(events),
+    checkConclusion(events),
     checkAccounting(events),
     checkFreeReplay(events),
     checkMarkings(events, origin),
@@ -251,6 +264,170 @@ function checkRequests(events: readonly RetraceEvent[]): Check {
     `${checked} calls answer the request this log rebuilds, digest for digest` +
       (undigested > 0 ? `; ${plural(undigested, "call")} predates the digests` : ""),
   );
+}
+
+/**
+ * Whether the answer a run reports is the answer its own log arrived at.
+ *
+ * `run.finished` carries the two things a person actually reads — what the run
+ * said, and how it ended — and until now nothing held either of them to
+ * anything. `requests` walks the effects and stops at the last one; `accounting`
+ * reads the same event and looks only at its totals. So a log whose closing line
+ * had been rewritten passed every check here, including the one that exists to
+ * make the run at the top of a lineage checkable at all. It is also the line
+ * `diff` quotes when it says two forks ended with different answers, and the
+ * line a fork's whole value is judged on.
+ *
+ * It does not have to be taken on trust, because the loop derives it rather than
+ * deciding it: the answer is the text of the last model response, and the status
+ * is the shape of the log's ending. Both are in the log already.
+ */
+function checkConclusion(events: readonly RetraceEvent[]): Check {
+  const name = "conclusion";
+  const finished = events.find((e) => e.type === "run.finished");
+  if (finished?.type !== "run.finished") {
+    return skipped(name, "the log has no run.finished event, so the run has not yet said how it ended");
+  }
+  const started = events.find((e) => e.type === "run.started");
+  if (started?.type !== "run.started") {
+    return skipped(name, "the log has no run.started event, so there is no agent to hold its ending to");
+  }
+
+  // Absent and empty are the same claim: the loop always writes the field, and
+  // a run that ended without an answer writes "" into it.
+  const reported = finished.output ?? "";
+  const effects = effectsOf(events);
+  const models = effects.filter((e) => e.kind === "model");
+  const last = models.at(-1);
+  // Assistant turns come from model responses and nowhere else, so the last one
+  // the loop could have had in hand is the last model call that came back with
+  // a value — which is what `lastAssistantText` reduces to, without the
+  // conversation to walk.
+  const answered = models.findLast((e) => e.failed === undefined && e.value !== null);
+  const response = answered?.value as ModelResponse | undefined;
+  const answer = response === undefined ? "" : answerText(response.content);
+
+  /** The output claim, against the turn the log says produced it. */
+  const held = (source: string): Check | undefined =>
+    reported === answer
+      ? undefined
+      : failed(
+          name,
+          `the run reports its answer as ${quote(reported)}, and ${source} is ${quote(answer)}`,
+        );
+
+  switch (finished.status) {
+    case "completed": {
+      if (last === undefined) {
+        return failed(name, "the run reports an answer, and its log records no model call to have given one");
+      }
+      if (answered !== last || response === undefined) {
+        return failed(name, `the run reports completing, and the model call it ends on (${last.key}) records no response`);
+      }
+      if (response.stopReason === "refusal") {
+        return failed(name, `the run reports completing, and the response at ${last.key} is a refusal`);
+      }
+      const asked = response.content.filter((b) => b.type === "tool_use");
+      if (asked.length > 0) {
+        return failed(
+          name,
+          `the run reports completing at ${last.key}, where the model asked for ` +
+            `${plural(asked.length, "tool call")} the log does not carry out`,
+        );
+      }
+      const mismatch = held("the text of the response it ends on");
+      if (mismatch) return mismatch;
+      if (finished.error !== undefined) {
+        return failed(name, `the run reports completing and carries the error "${finished.error}"`);
+      }
+      return ok(name, `completed on ${quote(answer)}, which is the response the log ends on`);
+    }
+
+    case "refused": {
+      if (answered !== last || response === undefined || response.stopReason !== "refusal") {
+        return failed(name, "the run reports a refusal, and the model call it ends on does not record one");
+      }
+      if (reported !== "") {
+        return failed(
+          name,
+          `the run reports a refusal and an answer of ${quote(reported)}: a declined request produces no answer`,
+        );
+      }
+      const expected = refusalError(response);
+      if (finished.error !== expected) {
+        return failed(name, `the run reports the refusal as "${finished.error}", where the response it ends on says "${expected}"`);
+      }
+      return ok(name, "refused, with no answer, on the refusal the log ends on");
+    }
+
+    case "max_steps": {
+      const steps = events.filter((e) => e.type === "step.started").length;
+      if (steps !== started.agent.maxSteps) {
+        return failed(
+          name,
+          `the run reports running out of steps, and the log starts ${plural(steps, "step")} of the ` +
+            `${started.agent.maxSteps} the agent allows`,
+        );
+      }
+      const mismatch = held("the last thing the model said");
+      if (mismatch) return mismatch;
+      const expected = exhaustedError(started.agent.maxSteps);
+      if (finished.error !== expected) {
+        return failed(name, `the run reports "${finished.error}", where a run out of steps says "${expected}"`);
+      }
+      return ok(name, `stopped at the ${plural(steps, "step")} the agent allows, on the last thing the model said`);
+    }
+
+    case "budget_exceeded": {
+      const mismatch = held("the last thing the model said");
+      if (mismatch) return mismatch;
+      // Which limit and what it was set to, from the budget this run declared.
+      // How far past it the run would have gone is in the tail of the message
+      // and known only to the run, so the head is as far as this can hold it.
+      const declared = (Object.entries(started.budget) as [keyof BudgetSpec, number][]).map(
+        ([limit, allowed]) => budgetLimitReached(limit, allowed),
+      );
+      if (declared.length === 0) {
+        return failed(name, "the run reports exceeding a budget, and it was started with no budget to exceed");
+      }
+      if (finished.error === undefined || !declared.some((head) => finished.error?.startsWith(head))) {
+        return failed(
+          name,
+          `the run reports stopping on "${finished.error ?? "no error at all"}", which is not a limit its budget declares`,
+        );
+      }
+      return ok(name, `stopped at a limit its own budget declares, on the last thing the model said`);
+    }
+
+    case "failed": {
+      const mismatch = held("the last thing the model said");
+      if (mismatch) return mismatch;
+      if (finished.error === undefined) {
+        return failed(name, "the run reports failing and says nothing about what failed");
+      }
+      // A throw from inside the journal is in the log as a failed effect. One
+      // from around it — a divergence, an irreversible call held back, a budget
+      // check — never reached an effect, and the message is the whole of what
+      // there is to compare.
+      const threw = effects.find((e) => e.failed !== undefined);
+      if (threw !== undefined && finished.error !== threw.failed?.message) {
+        return failed(
+          name,
+          `the run reports failing with "${finished.error}", and the call it died on ` +
+            `(${threw.kind}:${threw.key}) recorded "${threw.failed?.message}"`,
+        );
+      }
+      return ok(
+        name,
+        threw === undefined
+          ? "failed outside any recorded call, on the last thing the model said"
+          : `failed on ${threw.kind}:${threw.key}, with the message that call recorded`,
+      );
+    }
+
+    case "running":
+      return failed(name, "the log records the run as having finished and as still running");
+  }
 }
 
 /**
@@ -780,6 +957,16 @@ function outcomeOf(effect: Pick<Effect, "value" | "failed">): string {
 
 function plural(n: number, noun: string): string {
   return `${n} ${noun}${n === 1 ? "" : "s"}`;
+}
+
+/**
+ * A run's answer, on one line of a check. Shortened, because an answer can be a
+ * page and the finding is that two of them differ rather than how.
+ */
+function quote(text: string): string {
+  if (text === "") return "nothing";
+  const flat = text.replace(/\s+/g, " ");
+  return `"${flat.length > 48 ? `${flat.slice(0, 47)}…` : flat}"`;
 }
 
 function describe(cause: unknown): string {
