@@ -25,12 +25,15 @@ import {
 import { executed, recheckRun, type RecheckReport, type RecheckStatus } from "./recheck.ts";
 import { renderReport } from "./report.ts";
 import { DEFAULT_STORE_DIR, RunStore } from "./store.ts";
+import { lineageTrees, type TreeRun } from "./tree.ts";
 import { verifyRun } from "./verify.ts";
 import type { ContentBlock, ForkOrigin, Provider, RetraceEvent } from "./types.ts";
 
 const USAGE = `retrace — inspect and re-run recorded agent runs
 
   retrace ls                    list runs, newest last
+  retrace tree [run-id]         the runs made from a run, and what each asked
+                                that the run above it didn't
   retrace show <run-id>         print the run's timeline
   retrace cost <run-id>         per-step spend, and what replay saved
   retrace diff <run-a> <run-b>  where two runs stopped agreeing, whether they
@@ -130,6 +133,8 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
   switch (command) {
     case "ls":
       return cmdLs(io, store);
+    case "tree":
+      return cmdTree(io, store, rest[0]);
     case "show":
       return cmdShow(io, store, rest[0]);
     case "cost":
@@ -166,6 +171,87 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       io.err(`unknown command "${command}"\n\n${USAGE}`);
       return 1;
   }
+}
+
+function cmdTree(io: Io, store: RunStore, runId: string | undefined): number {
+  const forest = lineageTrees(store, runId);
+  if (forest.trees.length === 0) {
+    io.out(dim(`no runs in ${store.dir}\n`));
+    return 0;
+  }
+
+  let runs = 0;
+  let billed = 0;
+  let saved = 0;
+  for (const tree of forest.trees) {
+    io.out("\n");
+    // Above the root there is a run this store does not hold, which is why the
+    // family starts here rather than where the lineage does.
+    if (tree.before) io.out(dim(`↑ ${tree.before}, which is not in this store\n`));
+    printRun(io, tree.root, "", true, true, runId);
+    runs += tree.runs;
+    billed += tree.billedUsd;
+    saved += tree.savedUsd;
+  }
+
+  const free = saved > 0 ? ` · ${green(`${formatUsd(saved)} not paid a second time`)}` : "";
+  io.out(`\n${plural(runs, "run")} · ${formatUsd(billed)} billed${free}\n`);
+  if (forest.unreadable.length > 0) {
+    io.out(
+      red(
+        `${plural(forest.unreadable.length, "run")} could not be read, so ` +
+          `${forest.unreadable.length === 1 ? "it belongs" : "they belong"} to no family here: ` +
+          `${forest.unreadable.join(", ")}\n`,
+      ),
+    );
+  }
+  return 0;
+}
+
+/** One run of a family, then the runs made from it, indented under it. */
+function printRun(
+  io: Io,
+  node: TreeRun,
+  prefix: string,
+  last: boolean,
+  root: boolean,
+  marked: string | undefined,
+): void {
+  const connector = root ? "" : last ? "└─ " : "├─ ";
+  const under = prefix + (root ? "" : last ? "   " : "│  ");
+  const detail = `${under}  `;
+  const id = node.runId === marked ? bold(node.runId) : node.runId;
+
+  io.out(`${prefix}${connector}${id}  ${statusLabel(node.summary.status)}  ${dim(asked(node))}\n`);
+  io.out(`${detail}${dim(spend(node))}\n`);
+  const said = node.summary.error
+    ? red(node.summary.error)
+    : node.summary.output || dim("no answer");
+  io.out(`${detail}${truncate(said, 76)}\n`);
+
+  node.children.forEach((child, i) =>
+    printRun(io, child, under, i === node.children.length - 1, false, marked),
+  );
+}
+
+/** What this run was asking that the run above it wasn't. */
+function asked(node: TreeRun): string {
+  const parts: string[] = [];
+  if (node.reentry?.kind === "fork") parts.push(`fork at ${node.reentry.at}`);
+  if (node.reentry?.kind === "replay") parts.push("replay");
+  if (node.reentry?.kind === "resume") {
+    parts.push(`resume after ${plural(node.reentry.after, "effect")}`);
+  }
+  if (node.set.length > 0) parts.push(`set ${node.set.join(", ")}`);
+  if (node.moved.length > 0) parts.push(node.moved.join(", "));
+  return parts.join(" · ") || "recorded from scratch";
+}
+
+function spend(node: TreeRun): string {
+  const t = node.summary.totals;
+  if (!t) return `${plural(node.summary.steps, "step")} · still running, or stopped without totals`;
+  const free = t.savedUsd > 0 ? ` · ${formatUsd(t.savedUsd)} free` : "";
+  return `${plural(t.steps, "step")} · ${formatUsd(t.billedUsd)} billed${free}`;
 }
 
 function cmdLs(io: Io, store: RunStore): number {

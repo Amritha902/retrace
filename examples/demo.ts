@@ -14,6 +14,7 @@ import {
   explainStale,
   fork,
   formatUsd,
+  lineageTrees,
   MockProvider,
   objectSchema,
   overriddenEffects,
@@ -26,6 +27,7 @@ import {
   tool,
   toolUse,
   verifyRun,
+  type TreeRun,
 } from "../src/index.ts";
 
 let searches = 0;
@@ -171,12 +173,31 @@ console.log(
     `worth having\n`,
 );
 
+console.log("7. what four re-entries into one run leave behind\n");
+// A store of these is not a list of runs, it is a family: one recording and the
+// questions put to it. `ls` prints that in the order the runs happened, which is
+// the one order that hides the shape of it.
+const family = lineageTrees(store, "demo-original").trees[0]!;
+const draw = (node: TreeRun, indent: string): void => {
+  const how =
+    node.reentry?.kind === "fork" ? `fork at ${node.reentry.at}` : (node.reentry?.kind ?? "recorded");
+  const moved = node.moved.length > 0 ? ` · ${node.moved.join(", ")} moved` : "";
+  console.log(`   ${(indent + node.runId).padEnd(26)} ${how}${moved}`);
+  for (const child of node.children) draw(child, `${indent}  `);
+};
+draw(family.root, "");
+console.log(
+  `\n   ${family.runs} runs, ${formatUsd(family.billedUsd)} billed between them, ` +
+    `${formatUsd(family.savedUsd)} never paid a second time\n`,
+);
+
 const saving = 1 - forked.totals.billedUsd / original.totals.billedUsd;
 console.log(
   `Retrying the last step cost ${(saving * 100).toFixed(0)}% less than re-running from scratch.`,
 );
 console.log(
-  "\nNow try:  npx retrace show demo-forked   ·   npx retrace diff demo-original demo-forked" +
+  "\nNow try:  npx retrace show demo-forked   ·   npx retrace tree demo-original" +
+    "\n          npx retrace diff demo-original demo-forked" +
     "\n          npx retrace report demo-forked -o trace.html" +
     "\n          npx retrace verify demo-forked   ·   npx retrace stale demo-forked",
 );

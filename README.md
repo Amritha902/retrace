@@ -816,6 +816,7 @@ Every charge is tracked twice: `costUsd` is what the tokens are worth at list pr
 
 ```bash
 retrace ls                    # every run, with cost and what replay saved
+retrace tree [run-id]         # …arranged by what was forked from what, and why
 retrace show <run-id>         # the timeline, marking each effect live or replayed
 retrace cost <run-id>         # per-step spend
 retrace diff <run-a> <run-b>  # where two runs stopped agreeing, why, and where they can't
@@ -902,6 +903,53 @@ plain text where it doesn't — so `--set 'step:2#0:search=no results'` sets the
 text a tool returned and `--set 'step:1#0:charge/clock:0=1700000000000'` sets a
 timestamp it read. See [what if it had said something
 else](#what-if-it-had-said-something-else).
+
+### What a store of these turns into
+
+Forking is not a thing you do once. You fork at step 3 to rewrite the prompt,
+fork again at step 1 to see how far down the change has to go, fork *that* to
+replace what a search returned, and replay the original to check it still
+reproduces. What the store holds afterwards is not a list of runs, it is one
+recording and the questions put to it — and `ls` prints that in the order the
+runs happened, which is the one order that hides the shape of it.
+
+```
+$ retrace tree demo-original
+
+demo-original  completed  recorded from scratch
+  4 steps · $0.9200 billed
+  The market is large, contested, and priced per seat.
+├─ demo-replayed  completed  replay
+│    4 steps · $0 billed · $0.9200 free
+│    The market is large, contested, and priced per seat.
+├─ demo-forked  completed  fork at step 3 · system
+│    4 steps · $0.2300 billed · $0.6900 free
+│    Large market. Crowded. Per-seat pricing.
+└─ demo-counterfactual  completed  fork at step 3 · set step:0#0:search · conversation
+     4 steps · $0.2300 billed · $0.6900 free
+     Market size unknown. Crowded. Per-seat pricing.
+
+4 runs · $1.3800 billed · $2.3000 not paid a second time
+```
+
+The second half of each run's first line is the thing that run was asking that
+the run above it wasn't: where it cut the log, which effects it was told to
+[substitute a value for](#what-if-it-had-said-something-else), and which
+components of the request [moved underneath the prefix it
+replayed](#what-a-replayed-step-is-still-answering). `system` is a rewritten
+prompt, `conversation` is a rewritten world, and a `replay` with nothing after it
+is a run that asked exactly what its parent asked and got exactly the same
+answers. Read down the column and you have what you tried, not just what you ran.
+
+The last line is the same arithmetic the rest of this does, totalled over a
+family instead of a run: what re-entering that recording cost, and what it did
+not pay for twice.
+
+Pass no run id and it draws every family in the store. A run whose parent is not
+here roots its own, and says which run is missing above it — the same honesty
+[`verify`](#taking-a-lineage-with-you) applies to a lineage that leaves the
+store, and [`import`](#taking-a-lineage-with-you) is still the answer to it. It
+reads logs and executes nothing. In code it is `lineageTrees(store, runId)`.
 
 ### The run as a page
 
@@ -1475,6 +1523,15 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   moved, and a question that did not is a divergence your fork did not cause.
   Neither is a failure. The second one is the honest reading of a model with a
   temperature, and it is not something either log alone could offer.
+- **`tree` describes a store, not a lineage.** It arranges the runs a store
+  holds by what was forked, resumed or replayed from what, and takes what each
+  one was asking from that run's own log: the fork point it recorded, the
+  overrides it was handed, the staleness it marked at the time. It checks none
+  of it — a run is placed under the parent it names, on its own say-so, which is
+  exactly what `verify`'s `parent` and `lineage` checks exist to stop you taking
+  on trust. And a family is only as complete as the store: a run whose parent is
+  somewhere else roots a family of its own and says which run is missing above
+  it, rather than being drawn as though it came from nothing.
 - **`recheck` executes your tools, on purpose.** It is the one command here that
   reaches the world by design, so a recorded `send_email` is sent again unless it
   is marked `irreversible` or `--tool` keeps it out of the run — and a call that
@@ -1495,7 +1552,7 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
 one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads — what it asked, body and all, and what came back — inside the boundary, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log and the `conclusion` check that holds a run's reported answer and ending to the response its log ends on, the `diff` comparison that holds two logs to the prefix they claim from the same source and says whether the two runs were asking the same thing where they parted, and the `recheck` re-execution including its `unstable` finding, the watch on the
-ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, and the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for — is covered by 405 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, and the `tree` view that draws a store as the family of runs it actually is — is covered by 415 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -1503,7 +1560,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 405 tests, no network, no API key
+npm test           # 415 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

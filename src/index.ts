@@ -134,6 +134,14 @@ export { renderReport } from "./report.ts";
 export { DEFAULT_STORE_DIR, MemoryStore, RunStore, fingerprint, newRunId } from "./store.ts";
 export { objectSchema, tool, type ToolDefinition } from "./tools.ts";
 export {
+  lineageTrees,
+  walk,
+  type Forest,
+  type Reentry,
+  type RunTree,
+  type TreeRun,
+} from "./tree.ts";
+export {
   verifyEvents,
   verifyRun,
   type Check,

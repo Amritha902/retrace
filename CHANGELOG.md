@@ -311,8 +311,14 @@ publish contains rather than what changed since something.
 
 ### The CLI
 
-`retrace ls`, `show`, `cost`, `diff`, `replay`, `fork`, `plan`, `resume`,
-`stale`, `report`, `verify`, `recheck`, `export` and `import`.
+`retrace ls`, `tree`, `show`, `cost`, `diff`, `replay`, `fork`, `plan`,
+`resume`, `stale`, `report`, `verify`, `recheck`, `export` and `import`.
+`tree [run-id]` draws the family a run belongs to — every run forked, resumed or
+replayed from it, and from those — with what each one asked that the run above it
+did not: where it cut, what it was told to substitute, and which components moved
+under the prefix it replayed. Without a run id it draws every family in the
+store. A run whose parent is not in the store roots a family that says which run
+is missing above it, and a log too damaged to read is named rather than dropped.
 `replay` needs nothing but the log and exits non-zero if the run failed to
 reproduce, so it works as a regression check on the loop. `fork --module <path>`
 and `resume --module <path>` supply the half a log cannot hold — the tools, the
@@ -352,7 +358,7 @@ depend on.
 
 ### Verified by
 
-399 tests that run with no network and no API key, plus two `[live]` integration
+415 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:
