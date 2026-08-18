@@ -60,6 +60,7 @@ export {
   journalUpToEffect,
   journalUpToStep,
   nestedKey,
+  WORLD_KINDS,
   type DivergencePolicy,
   type EffectOutcome,
   type JournalEntry,
@@ -84,6 +85,7 @@ export {
   type PlannedStaleness,
 } from "./plan.ts";
 export { formatUsd, getRate, priceUsage, setRate, type RateCard } from "./pricing.ts";
+export { describeRead, readSlot, resolveRead, type RecordedRead } from "./read.ts";
 export {
   rebuildRequests,
   recordedMessages,

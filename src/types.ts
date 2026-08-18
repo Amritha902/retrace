@@ -85,6 +85,28 @@ export interface ToolContext {
    * part of that comparison, so two calls differing only there share a slot.
    */
   fetch(input: FetchInput, init?: RequestInit): Promise<Response>;
+  /**
+   * Any other read of the world, journaled because the tool says so.
+   *
+   * `fetch` above is the one the runtime can intercept; a database driver, a
+   * subprocess or a native HTTP client is somewhere no wrapper reaches, and a
+   * tool that reads one records an answer a replay cannot reproduce. Wrap the
+   * read and it becomes an effect like any other — executed once, recorded, and
+   * served from the log on every replay and in the live tail of every fork.
+   *
+   * ```ts
+   * const rows = await ctx.read("corpus", { term }, () => db.query(SQL, [term]));
+   * ```
+   *
+   * `source` names what is being read and `question` says what is being asked of
+   * it. The answer is served only to a later call naming the same source and
+   * asking the same question, so a fork whose live tail asks something else
+   * reads the world rather than being handed the wrong answer. A read that
+   * rejects is recorded and rejects again. The value goes through the log, so it
+   * has to be JSON-serializable, and what comes back on a replay is what
+   * survived that round trip.
+   */
+  read<T>(source: string, question: unknown, execute: () => T | Promise<T>): Promise<T>;
 }
 
 export interface Tool extends ToolSchema {
@@ -304,7 +326,7 @@ export type RetraceEvent =
       step: number;
       /** Position within the run's effect sequence. Dense, zero-based. */
       index: number;
-      kind: "model" | "tool" | "clock" | "uuid" | "random" | "fetch";
+      kind: "model" | "tool" | "clock" | "uuid" | "random" | "fetch" | "read";
       /** Semantic identity of this effect. A mismatch on replay means divergence. */
       key: string;
       /** What the effect returned, or null when it threw — see `failed`. */

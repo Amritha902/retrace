@@ -1,5 +1,5 @@
 import { invoke, recordedContext, toolKey, type ToolUse } from "./agent.ts";
-import { deterministicEntries, Journal } from "./journal.ts";
+import { deterministicEntries, Journal, WORLD_KINDS } from "./journal.ts";
 import { effectsOf } from "./replay.ts";
 import { RunStore } from "./store.ts";
 import type { ModelResponse, RetraceEvent, Tool } from "./types.ts";
@@ -130,13 +130,16 @@ export async function recheckEvents(
   // Reads resolve to what the run recorded at the same slots, so a tool that
   // puts a timestamp or an id in its answer is compared on the rest of it.
   //
-  // Every read but one. A recorded `ctx.fetch` is served to a fork, on purpose —
-  // a fork should differ from its parent in the thing you changed and nothing
-  // else — but serving it here would answer the question this command exists to
-  // ask. Whether the world still says what the log holds is exactly what a
-  // network read decides, so those go live and the rest stay pinned, which
-  // leaves the network as the only thing that can have moved.
-  const reads = deterministicEntries(effectsOf(events)).filter((e) => e.kind !== "fetch");
+  // Every read but the ones that read the world. A recorded `ctx.fetch` or
+  // `ctx.read` is served to a fork, on purpose — a fork should differ from its
+  // parent in the thing you changed and nothing else — but serving one here
+  // would answer the question this command exists to ask. Whether the world
+  // still says what the log holds is exactly what those reads decide, so they go
+  // live and the rest stay pinned, which leaves the world as the only thing that
+  // can have moved.
+  const reads = deterministicEntries(effectsOf(events)).filter(
+    (e) => !(WORLD_KINDS as readonly string[]).includes(e.kind),
+  );
   const journal = new Journal([], "strict", reads);
 
   const calls: RecheckedCall[] = [];

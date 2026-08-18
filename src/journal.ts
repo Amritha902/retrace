@@ -1,5 +1,6 @@
 import { realNow, type AmbientSource } from "./ambient.ts";
 import { DivergenceError, ReplayedFailure } from "./errors.ts";
+import type { RecordedRead } from "./read.ts";
 import type { RecordedFailure } from "./types.ts";
 
 /**
@@ -97,15 +98,27 @@ export type DivergencePolicy = "strict" | "live";
  * `Journal.deterministic`.
  *
  * Three of them are values nothing downstream cares about: a timestamp, an id,
- * a random draw, which only have to not change between runs. `fetch` is the odd
- * one, because a response very much has a meaning — but it belongs here for the
- * same reason: it is a read a tool made rather than a step the loop took, so it
- * is not part of the shape of the run, and a fork that goes live past the end of
- * the log should still see the world its parent saw. What keeps it honest is
- * that its key carries a digest of the request, so a call asking something else
- * finds no entry rather than the wrong one.
+ * a random draw, which only have to not change between runs. `fetch` and `read`
+ * are the odd ones, because an answer very much has a meaning — but they belong
+ * here for the same reason: they are reads a tool made rather than steps the
+ * loop took, so they are not part of the shape of the run, and a fork that goes
+ * live past the end of the log should still see the world its parent saw. What
+ * keeps them honest is that their keys carry a digest of what was asked, so a
+ * call asking something else finds no entry rather than the wrong one.
  */
-export const DETERMINISTIC_KINDS = ["clock", "uuid", "random", "fetch"] as const;
+export const DETERMINISTIC_KINDS = ["clock", "uuid", "random", "fetch", "read"] as const;
+
+/**
+ * The deterministic kinds that are a read of the world rather than a value that
+ * only has to be stable.
+ *
+ * Replays and forks serve these from the log like anything else — that is what
+ * makes a fork a controlled experiment rather than a second run. `recheck` is
+ * the one caller that must not, because whether the world still says what the
+ * log holds is the question it exists to ask, and serving the answer from the
+ * log would answer it in advance.
+ */
+export const WORLD_KINDS = ["fetch", "read"] as const;
 
 /** Separates an effect from the effects recorded inside it. */
 const NESTED = "/";
@@ -413,6 +426,14 @@ export function applyOverrides(
  * text, and only a `content`-shaped object replaces the outcome wholesale.
  */
 function substitute(effect: RecordedEffect, value: unknown): unknown {
+  // A read's source and question are facts about the call rather than about the
+  // answer, and replacing them would leave the log describing a call nobody
+  // made. Only the answer is the counterfactual, and a recorded rejection goes
+  // with it for the same reason `applyOverrides` drops one anywhere else.
+  if (effect.kind === "read") {
+    const { source, question } = (effect.value ?? {}) as RecordedRead;
+    return { source, question, value };
+  }
   if (effect.kind !== "tool") return value;
   if (typeof value === "object" && value !== null && "content" in value) return value;
   return { content: typeof value === "string" ? value : JSON.stringify(value), isError: false };
@@ -468,8 +489,10 @@ export function forkPointOf(effects: readonly RecordedEffect[], key: string): Re
     );
   }
   if (at.kind !== "model" && at.kind !== "tool") {
+    // "read" already names itself; the others are a kind of read.
+    const what = at.kind === "read" ? "read" : `${at.kind} read`;
     throw new Error(
-      `"${key}" is a ${at.kind} read inside "${key.split(NESTED)[0]}", not a call. A fork ` +
+      `"${key}" is a ${what} inside "${key.split(NESTED)[0]}", not a call. A fork ` +
         `point is a model or tool call; reads resolve by key and are served wherever the ` +
         `run reaches them.`,
     );

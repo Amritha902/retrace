@@ -12,12 +12,14 @@ import {
   type RecordedFetch,
 } from "./http.ts";
 import {
+  describeFailure,
   DETERMINISTIC_KINDS,
   Journal,
   nestedKey,
   type EffectOutcome,
   type Stamp,
 } from "./journal.ts";
+import { readSlot, resolveRead, type RecordedRead } from "./read.ts";
 import { fingerprint, newRunId, RunStore } from "./store.ts";
 import type {
   AgentSpec,
@@ -366,7 +368,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
         stamp: Stamp,
         outcome: EffectOutcome<ToolResult>,
         durationMs: number,
-        reads: readonly RecordedRead[],
+        reads: readonly JournaledRead[],
         ambient: readonly AmbientSource[],
       ): void => {
         emit({
@@ -406,7 +408,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
 
       const runOne = async (ordinal: number, call: ToolUse): Promise<void> => {
         const key = toolKey(step, ordinal, call.name);
-        const journaled: RecordedRead[] = [];
+        const journaled: JournaledRead[] = [];
         const context = journaledContext(journal, step, key, journaled);
         const stamp = toolStamp(call);
         let ambient: readonly AmbientSource[] = [];
@@ -472,7 +474,7 @@ export async function run(input: string, options: RunOptions): Promise<RunResult
             () => done.value,
             stamp,
           );
-          const journaled: RecordedRead[] = [];
+          const journaled: JournaledRead[] = [];
           for (const read of done.reads) {
             const committed = await journal.deterministic(read.kind, read.key, () => read.value);
             journaled.push({ kind: read.kind, key: read.key, ...committed });
@@ -566,7 +568,7 @@ type ToolResult = { content: string; isError: boolean };
 type DeterministicKind = (typeof DETERMINISTIC_KINDS)[number];
 
 /** A journal read a tool made, ready to go in the log. */
-interface RecordedRead {
+interface JournaledRead {
   kind: DeterministicKind;
   key: string;
   value: unknown;
@@ -587,7 +589,7 @@ interface DetachedRead {
 type Take = <T>(kind: DeterministicKind, key: string, execute: () => T | Promise<T>) => Promise<T>;
 
 /** The reads recorded inside a tool call that was itself served from the log. */
-function replayedReads(outcome: EffectOutcome<ToolResult>): RecordedRead[] {
+function replayedReads(outcome: EffectOutcome<ToolResult>): JournaledRead[] {
   return outcome.nested.map((e) => ({
     kind: e.kind as DeterministicKind,
     key: e.key,
@@ -709,6 +711,27 @@ function toolContext(step: number, ownerKey: string, take: Take): ToolContext {
       );
       return rebuildResponse(recorded);
     },
+    read: async <T>(
+      source: string,
+      question: unknown,
+      execute: () => T | Promise<T>,
+    ): Promise<T> => {
+      const recorded = await at<RecordedRead>(
+        "read",
+        // Outside the watch, like `ctx.fetch` and for the same reason: whatever
+        // the body reaches for is covered by the answer being recorded, so
+        // reporting it as a read that got around the journal would be wrong.
+        async () => {
+          try {
+            return { source, question, value: await unwatched(execute) };
+          } catch (cause) {
+            return { source, question, error: describeFailure(cause) };
+          }
+        },
+        `:${source}:${readSlot(source, question)}`,
+      );
+      return resolveRead(recorded) as T;
+    },
   };
 }
 
@@ -717,7 +740,7 @@ function journaledContext(
   journal: Journal,
   step: number,
   ownerKey: string,
-  journaled: RecordedRead[],
+  journaled: JournaledRead[],
 ): ToolContext {
   const take = async <T>(
     kind: DeterministicKind,

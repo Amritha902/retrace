@@ -660,11 +660,58 @@ exists to ask, so its network reads go live while the clock, the ids and the
 randomness stay pinned to what the run recorded — which leaves the network as
 the only thing a disagreement can be about.
 
+## Reading everything else
+
+`ctx.fetch` covers the network because the runtime can intercept it. A database
+driver, a subprocess, a native HTTP client and a file on disk are all somewhere
+no wrapper reaches — and a tool that reads one records an answer the world can
+move under, in the one place nothing here could see it happen.
+
+`ctx.read` is the tool saying so itself:
+
+```ts
+run: async ({ term }, ctx) => {
+  const rows = await ctx.read("corpus", { term }, () => db.query(SQL, [term]));
+  return rows.join("\n");
+},
+```
+
+```
+$ retrace show read
+
+step 0
+  live      tool   step:0#0:lookup  41ms
+        → one
+  live      read   step:0#0:lookup/read:0:corpus:56c47f5e0f8e  12ms
+        → corpus {"term":"alpha"} → one
+```
+
+From there it is an effect like any other. It executes once, the answer goes in
+the log beside the question it answered, and every replay and every fork is
+served from the log instead of the corpus. A read that rejected is recorded and
+rejects again, so a run that died because a database was down does not replay
+into one that reached it.
+
+`source` names what is being read and `question` says what is being asked of it,
+and both are digested into the slot — the same bargain [`ctx.fetch`
+makes](#reading-the-network), with you supplying the question instead of the
+runtime reading it off a request. A fork whose live tail asks the same source the
+same thing is served the parent's answer, which is what makes the fork a
+controlled experiment; one that asks something else finds nothing in that slot
+and reads the world.
+
+What this does not do is notice. A tool that queries its corpus directly is
+invisible to the journal in a way a stray `Date.now()` is not — there is no
+global to watch — so the reads it makes are covered exactly to the extent the
+tool declares them. That is the honest division of labour, and
+[`recheck`](#checking-a-log-against-the-world) is still the command that finds
+out about the rest, by executing the calls again and reporting what has moved.
+
 ## Time, ids and randomness
 
 A tool's second argument is the journal — [`ctx.fetch`](#reading-the-network)
-above, and three smaller reads. Anything taken from it is recorded and comes
-back unchanged later:
+and [`ctx.read`](#reading-everything-else) above, and three smaller reads.
+Anything taken from it is recorded and comes back unchanged later:
 
 ```ts
 run: async ({ amount }, ctx) => {
@@ -1448,7 +1495,7 @@ it is `recheckRun(runId, { tools })`.
 
 Runs are JSONL under `.retrace/runs/<run-id>.jsonl`, one event per line, appended synchronously. If the process dies mid-run the log is still a truthful prefix — a torn final line is dropped on read, and everything before it stands — and a truthful prefix is enough to [pick the run back up](#picking-a-run-back-up). `MemoryStore` is the same interface with nothing on disk.
 
-The log holds normalized, provider-agnostic content, plus the provider's own blocks verbatim (thinking blocks are signed and have to be echoed back byte-for-byte). A response a tool fetched through `ctx.fetch` is flattened into the parts a tool can read back out — status, status text, headers and body — because a `Response` is a one-shot stream over a socket that is closed long before anyone replays it. The request that asked for it is flattened the same way, method, URL and body, so a `POST` in the log says what was posted rather than only where. A run recorded today still replays after the SDK's types change underneath it. It also holds the tool declarations the run was recorded with, as the model was shown them — the agent spec carries the model and the prompt but never those, and without them a `stale (tools)` marking is the one staleness nothing could follow up.
+The log holds normalized, provider-agnostic content, plus the provider's own blocks verbatim (thinking blocks are signed and have to be echoed back byte-for-byte). A response a tool fetched through `ctx.fetch` is flattened into the parts a tool can read back out — status, status text, headers and body — because a `Response` is a one-shot stream over a socket that is closed long before anyone replays it. The request that asked for it is flattened the same way, method, URL and body, so a `POST` in the log says what was posted rather than only where. A `ctx.read` goes in as the source, the question and the answer, for the same reason: a recorded value that does not say what it is a value *to* is not something a reader or a `diff` can do anything with. A run recorded today still replays after the SDK's types change underneath it. It also holds the tool declarations the run was recorded with, as the model was shown them — the agent spec carries the model and the prompt but never those, and without them a `stale (tools)` marking is the one staleness nothing could follow up.
 
 ## Determinism, honestly
 
@@ -1470,7 +1517,8 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   answers stop depending on a corpus that has moved since. What it covers is
   `fetch`: a tool reaching the network through a native client, a database
   driver or a subprocess is outside it, and comes back marked only where the
-  global `fetch` is what it used. Its slot carries a digest of the method, the
+  global `fetch` is what it used — the bullet below is how such a tool brings
+  the read inside the journal anyway. Its slot carries a digest of the method, the
   URL and the body, so a call asking something else goes live rather than being
   handed the wrong answer — but the body has to be one that can be read twice
   for that to hold. A `ReadableStream` body cannot be read without taking it
@@ -1482,6 +1530,22 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   it is exactly what [`recheck`](#checking-a-log-against-the-world) refuses to
   serve, since asking whether it still holds is the one thing that command is
   for.
+- **Every other read of the world is journaled if the tool declares it.**
+  `ctx.read(source, question, fn)` executes once, records the answer beside the
+  question, and serves it from the log on every replay and in the live tail of
+  every fork — the same contract `ctx.fetch` has, for the reads no wrapper can
+  intercept. Its slot carries a digest of the source and the question, so a call
+  asking something else reads the world rather than being handed the wrong
+  answer, and a read that rejected rejects again. Three things it is honest
+  about. The value goes through the log, so it has to be JSON-serializable and
+  what comes back on a replay is what survived that round trip. The question is
+  the caller's description of what was asked, not something the runtime derived,
+  so two different queries described identically share a slot — that is the one
+  way to make this lie, and it is in your hands rather than the journal's.
+  And nothing here notices a tool that *doesn't* declare its reads: a bare
+  `db.query` has no global to watch, so unlike a stray `Date.now()` it leaves no
+  mark at all, and [`recheck`](#checking-a-log-against-the-world) executing the
+  call again is still the only thing that finds it.
 - **Clock and randomness are journaled only if you take them from the tool
   context.** `ctx.now()`, `ctx.uuid()` and `ctx.random()` are recorded and
   stable; a tool that calls `Date.now()` directly still reads the real clock and
@@ -1607,11 +1671,11 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   call the clock, ids and randomness the log recorded at the same slots, so a
   tool that takes those from `ctx` is compared on what it said rather than on
   when it was asked; a tool reading `Date.now()` directly comes back `unstable`,
-  which is the honest name for what would happen to it on a fork. `ctx.fetch` is
-  the one read it does *not* serve from the log: everything else is pinned so
-  that the network is the only thing a disagreement can be about, which is what
-  makes a tool that reads the world through `ctx.fetch` the tool this command
-  can be precise about.
+  which is the honest name for what would happen to it on a fork. `ctx.fetch`
+  and `ctx.read` are the reads it does *not* serve from the log: everything else
+  is pinned so that the world is the only thing a disagreement can be about,
+  which is what makes a tool that reads the world through one of them the tool
+  this command can be precise about.
 - **`search` answers a question by making the forks, and the forks are real.**
   Every trial executes its live tail for real, so a search across a run with an
   unmarked `send_email` in it sends the mail once per fork it makes — the same
@@ -1631,8 +1695,8 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 ## Status
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
-one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads — what it asked, body and all, and what came back — inside the boundary, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log and the `conclusion` check that holds a run's reported answer and ending to the response its log ends on, the `diff` comparison that holds two logs to the prefix they claim from the same source and says whether the two runs were asking the same thing where they parted, and the `recheck` re-execution including its `unstable` finding, the watch on the
-ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, the `tree` view that draws a store as the family of runs it actually is, and the `search` walk that forks downward until a change takes and reports the cheapest fork point it did — is covered by 434 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads — what it asked, body and all, and what came back — inside the boundary, the `ctx.read` that does the same for the database queries, subprocesses and native clients no wrapper can intercept, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log and the `conclusion` check that holds a run's reported answer and ending to the response its log ends on, the `diff` comparison that holds two logs to the prefix they claim from the same source and says whether the two runs were asking the same thing where they parted, and the `recheck` re-execution including its `unstable` finding, the watch on the
+ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, the `tree` view that draws a store as the family of runs it actually is, and the `search` walk that forks downward until a change takes and reports the cheapest fork point it did — is covered by 450 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -1640,7 +1704,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 434 tests, no network, no API key
+npm test           # 450 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

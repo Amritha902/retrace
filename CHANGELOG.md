@@ -91,6 +91,23 @@ publish contains rather than what changed since something.
   question it exists to ask — so its network reads go live while the clock, the
   ids and the randomness stay pinned, leaving the network as the only thing a
   disagreement can be about.
+- **`ctx.read` journals everything else.** `ctx.fetch` covers the network
+  because the runtime can intercept it; a database driver, a subprocess or a
+  native HTTP client is somewhere no wrapper reaches, and until now there was no
+  way to bring one inside the journal even deliberately. `ctx.read(source,
+  question, fn)` is the tool saying so itself: the answer is executed once,
+  recorded beside the question it answered, and served from the log on every
+  replay and in the live tail of every fork, exactly as a fetch is. It resolves
+  by key with the source and the question digested into the slot, so a fork
+  asking something else reads the world rather than being handed the wrong
+  answer; a read that rejects is recorded and rejects again; and a body reaching
+  the clock inside one is not reported as ambient, because the answer around it
+  is what the log holds. The value goes through JSON, so what comes back on a
+  replay is what survived that round trip. `recheck` declines to serve these for
+  the same reason it declines to serve a fetch, and `show`, the HTML report and
+  `diff` all read them like the network reads they generalize. What this does
+  not add is detection: a tool that reads a corpus without saying so is still
+  invisible, and still exactly what `recheck` is for.
 - **A tool that goes around them is noticed.** `Date.now()`, `new Date()`,
   `Math.random()`, `crypto.randomUUID()` and `fetch` are watched while a tool body runs,
   and a call that reaches one is recorded with what it reached for, as

@@ -9,6 +9,7 @@ import { describeFetch, type RecordedFetch } from "./http.ts";
 import { loadRunModule, type RunModule } from "./module.ts";
 import { planFork } from "./plan.ts";
 import { formatUsd } from "./pricing.ts";
+import { describeRead, type RecordedRead } from "./read.ts";
 import type { Overrides } from "./journal.ts";
 import {
   ambientEffects,
@@ -351,10 +352,14 @@ function printEvent(io: Io, event: RetraceEvent): void {
         const v = event.value as { content?: string; isError?: boolean };
         io.out(`        ${v.isError ? red("error") : dim("→")} ${truncate(v.content ?? "", 120)}\n`);
       }
-      // The key of a fetch carries a digest of the request rather than the
-      // request, so the line above says which slot and not what was asked.
+      // The key of a fetch or a read carries a digest of what was asked rather
+      // than the thing itself, so the line above says which slot and not what
+      // the question was.
       if (event.kind === "fetch") {
         io.out(`        ${dim("→")} ${truncate(describeFetch(event.value as RecordedFetch), 120)}\n`);
+      }
+      if (event.kind === "read") {
+        io.out(`        ${dim("→")} ${truncate(describeRead(event.value as RecordedRead), 120)}\n`);
       }
       break;
     }
@@ -545,6 +550,8 @@ function unaccounted(kind: string | undefined): string {
       return "the tool answered one input two ways — it reads something the journal does not cover, or the world moved under it";
     case "fetch":
       return "the network answered one request two ways — the world moved between the runs";
+    case "read":
+      return "the source answered one question two ways — the world moved between the runs";
     default:
       return "nothing either log holds accounts for it";
   }

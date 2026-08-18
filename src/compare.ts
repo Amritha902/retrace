@@ -220,6 +220,11 @@ function askedOf(l: Effect, r: Effect): Asked | undefined {
       : { kind: "same" };
   }
 
+  // A read carries its digest in its key too, and unlike a fetch there is no
+  // body it could have failed to read: the caller handed the question over
+  // whole, so a shared slot is the same source asked the same thing.
+  if (l.kind === "read") return { kind: "same" };
+
   return {
     kind: "unknown",
     why: "one of these calls was recorded before a call carried a digest of what it was asked",

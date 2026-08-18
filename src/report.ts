@@ -10,6 +10,7 @@
 import { orderFacets } from "./agent.ts";
 import { describeFetch, type RecordedFetch } from "./http.ts";
 import { formatUsd } from "./pricing.ts";
+import { describeRead, type RecordedRead } from "./read.ts";
 import { effectsOf, type RunSummary } from "./replay.ts";
 import type { ContentBlock, ModelResponse, RetraceEvent, Usage } from "./types.ts";
 
@@ -313,6 +314,7 @@ function readValue(effect: Effect): string {
     return `${effect.value}  ${isoTime(effect.value)}`;
   }
   if (effect.kind === "fetch") return describeFetch(effect.value as RecordedFetch);
+  if (effect.kind === "read") return describeRead(effect.value as RecordedRead);
   return typeof effect.value === "string" ? effect.value : JSON.stringify(effect.value);
 }
 
