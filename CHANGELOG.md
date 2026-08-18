@@ -252,6 +252,20 @@ publish contains rather than what changed since something.
   connection lives and `lineage` is what walks them. An override excuses the
   position it substituted and not the ones after it, which still came out of the
   log unchanged.
+- **Why two runs parted, not only where.** Every pair `compareRuns` lines up
+  carries an `asked`, and `retrace diff` prints it as a line of its own: whether
+  the two runs were asking the same thing at the position they answered
+  differently. Both logs record the digest of what each call was asked, one
+  component at a time, so a question that moved names the component — `system` on
+  a rewritten prompt, `conversation` under an override — and a question that did
+  not moved names nothing, because there is nothing your fork did. That second
+  reading is the one no single log could offer: an identical request answered two
+  ways is the provider, a tool that reads something the journal does not cover,
+  or a corpus that moved between the runs. A `ctx.fetch` carries its digest in
+  its key rather than beside it, so a shared slot settles it — unless the body
+  was one the journal could not read, and then it says so. A value a run was told
+  to serve answers no question and gets no line, and a log written before calls
+  carried digests is reported unsettled rather than guessed at.
 - **`recheckRun(runId, { tools })`.** The other half of `verify`, and the only
   thing here that reaches the world on purpose: it puts each recorded tool call
   back to the tool as it is today — with the input the model supplied at the

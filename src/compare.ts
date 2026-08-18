@@ -1,3 +1,4 @@
+import { orderFacets } from "./agent.ts";
 import { effectsOf, summarize, type RunSummary } from "./replay.ts";
 import { fingerprint, RunStore } from "./store.ts";
 import type { ForkOrigin, RetraceEvent } from "./types.ts";
@@ -22,6 +23,33 @@ export type Kinship =
   | { kind: "siblings"; origin: string }
   | { kind: "unrelated" };
 
+/**
+ * Whether the two runs were asking the same thing at a position where they
+ * answered differently.
+ *
+ * `diff` has always been able to say *where* two runs parted. This is the
+ * question a reader asks next and no log could answer alone: were they even
+ * asking the same thing there? Every model and tool call carries a digest of
+ * what it was asked, and the two logs each carry their own — so putting them
+ * side by side separates the two readings of one divergence.
+ *
+ * `moved` is the fork doing what you asked, and `facets` names which part of
+ * the question moved — `system` on a rewritten prompt, `conversation` under an
+ * override. An empty list is a question that moved with neither log saying
+ * which part, exactly as an older log's `stale` marking names nothing.
+ *
+ * `same` is the reading that was invisible before and is usually the one worth
+ * having: an identical question, answered two different ways. Nothing about
+ * that is your change, and nothing in either log accounts for it — a model with
+ * a temperature, a tool that reads something the journal does not cover, or a
+ * corpus that moved between the two runs.
+ */
+export type Asked =
+  | { kind: "moved"; facets: string[] }
+  | { kind: "same" }
+  /** The logs cannot say, and `why` is what stops them. */
+  | { kind: "unknown"; why: string };
+
 /** What the two logs hold at one position in their effect sequences. */
 export interface EffectPair {
   index: number;
@@ -34,6 +62,13 @@ export interface EffectPair {
    * making the same calls at all, which is where a fork usually ends up.
    */
   verdict: "same" | "value" | "call";
+  /**
+   * Whether the two runs asked the same thing here. Present only on a `value`
+   * verdict: a `call` verdict is two different calls, which is a divergence in
+   * the shape of the run rather than in what one call was asked, and a `same`
+   * one has nothing to explain.
+   */
+  asked?: Asked;
 }
 
 export interface RunComparison {
@@ -105,11 +140,14 @@ export function compareEvents(
   for (let i = 0; i < Math.max(left.length, right.length); i++) {
     const l = left[i];
     const r = right[i];
+    const seen = verdict(l, r);
+    const asked = seen === "value" && l !== undefined && r !== undefined ? askedOf(l, r) : undefined;
     pairs.push({
       index: i,
       ...(l !== undefined ? { a: l } : {}),
       ...(r !== undefined ? { b: r } : {}),
-      verdict: verdict(l, r),
+      verdict: seen,
+      ...(asked !== undefined ? { asked } : {}),
     });
   }
 
@@ -135,6 +173,62 @@ export function compareEvents(
     ...(contradiction !== undefined ? { contradiction } : {}),
     ok: contradiction === undefined,
   };
+}
+
+/**
+ * Hold the two recorded questions against each other at one position the two
+ * runs answered differently.
+ *
+ * The comparison is between the digests the two logs recorded at the time, not
+ * between anything rebuilt now, so it says the same thing on a machine that has
+ * neither run's tools and neither run's provider.
+ */
+function askedOf(l: Effect, r: Effect): Asked | undefined {
+  // A value one of them was told to serve is not an answer to a question, so
+  // there is no question to have moved. The fork's own `overrides` is where
+  // that difference is on record.
+  if (l.overridden === true || r.overridden === true) return undefined;
+
+  // Clock, id and random reads are answers to no question — which is why they
+  // carry no digest — so there is nothing here to compare.
+  if (l.kind === "clock" || l.kind === "uuid" || l.kind === "random") return undefined;
+
+  if (l.requestFacets !== undefined && r.requestFacets !== undefined) {
+    const names = new Set([...Object.keys(l.requestFacets), ...Object.keys(r.requestFacets)]);
+    const moved = [...names].filter((n) => l.requestFacets?.[n] !== r.requestFacets?.[n]);
+    if (moved.length > 0) return { kind: "moved", facets: orderFacets(moved) };
+    // Facets agreeing and the whole-request digest not is a component this
+    // build hashes and does not attribute — the log says the question moved,
+    // and nothing in it says which part.
+    return l.requestHash === r.requestHash ? { kind: "same" } : { kind: "moved", facets: [] };
+  }
+
+  if (l.requestHash !== undefined && r.requestHash !== undefined) {
+    return l.requestHash === r.requestHash ? { kind: "same" } : { kind: "moved", facets: [] };
+  }
+
+  // A fetch carries its digest in its key rather than beside it, so a shared
+  // key already says the method, the URL and the body matched — except where
+  // the body was one the journal could not read without taking it from the
+  // fetch about to send it, and then the shared slot proves nothing.
+  if (l.kind === "fetch") {
+    return unreadBody(l) || unreadBody(r)
+      ? {
+          kind: "unknown",
+          why: "the body of one of these requests was never read, so the slot they share does not say they asked the same thing",
+        }
+      : { kind: "same" };
+  }
+
+  return {
+    kind: "unknown",
+    why: "one of these calls was recorded before a call carried a digest of what it was asked",
+  };
+}
+
+function unreadBody(effect: Effect): boolean {
+  const value = effect.value as { request?: { unread?: true } } | null;
+  return value?.request?.unread === true;
 }
 
 function verdict(l: Effect | undefined, r: Effect | undefined): EffectPair["verdict"] {

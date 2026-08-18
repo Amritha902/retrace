@@ -33,7 +33,8 @@ const USAGE = `retrace — inspect and re-run recorded agent runs
   retrace ls                    list runs, newest last
   retrace show <run-id>         print the run's timeline
   retrace cost <run-id>         per-step spend, and what replay saved
-  retrace diff <run-a> <run-b>  where two runs stopped agreeing, and whether
+  retrace diff <run-a> <run-b>  where two runs stopped agreeing, whether they
+                                were asking the same thing there, and whether
                                 they agree everywhere they had to
   retrace replay <run-id>       re-run it from the log, and check it reproduces
   retrace fork <run-id> --at N  replay the steps below N, then run live
@@ -316,7 +317,7 @@ function cmdDiff(io: Io, store: RunStore, a: string | undefined, b: string | und
       io.out(
         `${String(pair.index).padStart(7)} ${red("≠")} ` +
           (pair.verdict === "value"
-            ? `${left} ${dim("— same call, different result")}\n`
+            ? `${left} ${dim(`— ${valueNote(pair)}`)}\n`
             : `${left} ${dim("|")} ${pair.b ? `${pair.b.kind}:${pair.b.key}` : dim("(none)")}\n`),
       );
     }
@@ -329,6 +330,11 @@ function cmdDiff(io: Io, store: RunStore, a: string | undefined, b: string | und
         ? `nowhere: both logs hold the same ${cmp.pairs.length} effects\n`
         : `${yellow(`at effect ${cmp.divergedAt}`)}${divergenceNote(cmp)}\n`),
   );
+  // Where the two parted on one call rather than on the shape of the run, the
+  // question that call was asked is the next thing a reader wants, and the two
+  // logs recorded it. See `askedOf`.
+  const diverged = cmp.divergedAt === -1 ? undefined : cmp.pairs[cmp.divergedAt];
+  if (diverged?.asked !== undefined) io.out(`${dim("asked")}     ${askedLine(diverged)}\n`);
   io.out(`${dim("ended")}     ${endedLine(cmp)}\n`);
   if (cmp.a.totals && cmp.b.totals) {
     io.out(
@@ -382,6 +388,60 @@ function divergenceNote(cmp: RunComparison): string {
       ? ", a value one of them was told to serve in place of the recorded one"
       : ", inside the prefix they share",
   );
+}
+
+/** One position the two runs answered differently, in the effect list. */
+function valueNote(pair: EffectPair): string {
+  if (pair.a?.overridden === true || pair.b?.overridden === true) {
+    return "same call, a value one of them was told to serve";
+  }
+  switch (pair.asked?.kind) {
+    case "moved":
+      return pair.asked.facets.length === 0
+        ? "same call, asked something else"
+        : `same call, asked something else — ${pair.asked.facets.join(", ")}`;
+    case "same":
+      return "same call, same question, different answer";
+    default:
+      return "same call, different result";
+  }
+}
+
+/**
+ * The same reading as a claim about the run, under the effect list. This is the
+ * line that separates a fork doing what you asked from two runs that parted on
+ * something neither of them changed.
+ */
+function askedLine(pair: EffectPair): string {
+  const asked = pair.asked;
+  const indent = " ".repeat(10);
+  switch (asked?.kind) {
+    case "moved":
+      return asked.facets.length === 0
+        ? dim("a different question there, and neither log says which part of it moved")
+        : `${yellow("a different question there")}${dim(` — ${asked.facets.join(", ")}`)}`;
+    case "same":
+      return (
+        `${yellow("the same question there, answered differently")}\n` +
+        dim(`${indent}${unaccounted(pair.a?.kind)}`)
+      );
+    default:
+      return dim(`not something these two logs settle: ${asked?.why ?? ""}`);
+  }
+}
+
+/** What answers one question two ways, by the kind of call that was asked it. */
+function unaccounted(kind: string | undefined): string {
+  switch (kind) {
+    case "model":
+      return "the provider answered one request two ways — nothing either log holds accounts for it";
+    case "tool":
+      return "the tool answered one input two ways — it reads something the journal does not cover, or the world moved under it";
+    case "fetch":
+      return "the network answered one request two ways — the world moved between the runs";
+    default:
+      return "nothing either log holds accounts for it";
+  }
 }
 
 function endedLine(cmp: RunComparison): string {

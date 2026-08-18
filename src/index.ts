@@ -27,6 +27,7 @@ export {
 export {
   compareEvents,
   compareRuns,
+  type Asked,
   type EffectPair,
   type Kinship,
   type RunComparison,

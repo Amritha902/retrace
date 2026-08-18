@@ -818,7 +818,7 @@ Every charge is tracked twice: `costUsd` is what the tokens are worth at list pr
 retrace ls                    # every run, with cost and what replay saved
 retrace show <run-id>         # the timeline, marking each effect live or replayed
 retrace cost <run-id>         # per-step spend
-retrace diff <run-a> <run-b>  # where two runs stopped agreeing, and where they can't
+retrace diff <run-a> <run-b>  # where two runs stopped agreeing, why, and where they can't
 retrace replay <run-id>       # re-run it from the log and check it reproduces
 retrace fork <run-id> --at N  # replay the steps below N, then run live
 retrace fork … --at <key>     # …or re-enter mid-step, at one recorded call
@@ -1141,13 +1141,44 @@ demo-original  completed  ·  demo-forked  completed
 demo-forked forked from demo-original at step 3
 
     0–5 = 6 shared
-      6 ≠ model:step:3 — same call, different result
+      6 ≠ model:step:3 — same call, asked something else — system
 
 free      6 effects demo-forked replayed from demo-original, value for value
 diverges  at effect 6, the first effect either run ran for itself
+asked     a different question there — system
 ended     both completed, with different answers
 billed    $0.9200 → $0.2300
 ```
+
+`diverges` says where the two runs parted. `asked` is the question a reader has
+next, and the one neither log can answer alone: were they even asking the same
+thing there? Both logs carry [the digest of what each call was
+asked](#what-a-replayed-step-is-still-answering), component by component, so
+putting the two side by side separates the two readings of one divergence. Here
+the fork rewrote the prompt, `system` moved, and the run went somewhere else
+because of the thing you changed.
+
+The other reading is the one that used to be invisible:
+
+```
+      6 ≠ model:step:3 — same call, same question, different answer
+...
+asked     the same question there, answered differently
+          the provider answered one request two ways — nothing either log holds
+          accounts for it
+```
+
+The same request, digest for digest, answered two ways. Nothing about that is
+your fork — it is a model with a temperature, and the two runs would have parted
+there whatever you changed. On a tool call it means the tool reads something the
+journal does not cover or the world moved under it, which is
+[`recheck`](#checking-a-log-against-the-world)'s finding arrived at from two logs
+and no execution; on a `ctx.fetch` it is the corpus itself answering one request
+two ways. A call one of the runs was [told to serve a
+value](#what-if-it-had-said-something-else) is answering no question and gets no
+line, and a log written before calls carried digests says the question is not
+something the two of them settle rather than guessing. In code it is the `asked`
+field on each pair.
 
 The bottom half is the part that is a check rather than a description. Where the
 two part ways is a fact about your change and nothing to complain about —
@@ -1438,7 +1469,12 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   nothing, because the logs in between are where the connection lives, and
   `verify` is what walks them. Everything above the shared prefix is a
   description and not a verdict — a fork that diverges from its parent at the
-  fork point is a fork working.
+  fork point is a fork working. What it *can* say about that divergence is
+  whether the two runs were asking the same thing there, because both logs
+  recorded the digest of it: a question that moved names the component that
+  moved, and a question that did not is a divergence your fork did not cause.
+  Neither is a failure. The second one is the honest reading of a model with a
+  temperature, and it is not something either log alone could offer.
 - **`recheck` executes your tools, on purpose.** It is the one command here that
   reaches the world by design, so a recorded `send_email` is sent again unless it
   is marked `irreversible` or `--tool` keeps it out of the run — and a call that
@@ -1458,8 +1494,8 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 ## Status
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
-one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads — what it asked, body and all, and what came back — inside the boundary, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log and the `conclusion` check that holds a run's reported answer and ending to the response its log ends on, the `diff` comparison that holds two logs to the prefix they claim from the same source, and the `recheck` re-execution including its `unstable` finding, the watch on the
-ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, and the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for — is covered by 399 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads — what it asked, body and all, and what came back — inside the boundary, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log and the `conclusion` check that holds a run's reported answer and ending to the response its log ends on, the `diff` comparison that holds two logs to the prefix they claim from the same source and says whether the two runs were asking the same thing where they parted, and the `recheck` re-execution including its `unstable` finding, the watch on the
+ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, and the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for — is covered by 405 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -1467,7 +1503,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 399 tests, no network, no API key
+npm test           # 405 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

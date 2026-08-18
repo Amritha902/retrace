@@ -294,9 +294,13 @@ test("the CLI collapses the shared prefix and names where the two went their own
 
   assert.equal(code, 0, io.errors());
   assert.match(io.text(), /0–3 = 4 shared/);
-  assert.match(io.text(), /4 ≠ model:step:2 — same call, different result/);
+  assert.match(io.text(), /4 ≠ model:step:2 — same call, same question, different answer/);
   assert.match(io.text(), /free\s+4 effects forked replayed from baseline, value for value/);
   assert.match(io.text(), /diverges\s+at effect 4, the first effect either run ran for itself/);
+  // This fork rewrote nothing about the request — only what came back — so the
+  // honest reading of where it parted is that the question did not move.
+  assert.match(io.text(), /asked\s+the same question there, answered differently/);
+  assert.match(io.text(), /the provider answered one request two ways/);
   assert.match(io.text(), /ended\s+both completed, with different answers/);
 });
 
@@ -327,6 +331,198 @@ test("the CLI exits non-zero on a prefix two runs cannot both have taken from on
   assert.match(io.text(), /contradicted: effect 2 \(model:step:1\) differs/);
   assert.match(io.text(), /both replayed it from baseline/);
 });
+
+test("a fork that rewrote the prompt names the part of the question that moved", async () => {
+  const store = new MemoryStore();
+  await recordBaseline(store);
+  await fork("baseline", {
+    provider: new MockProvider([{ content: [text("ten words")] }]),
+    tools: [lookup],
+    atStep: 2,
+    agent: { system: "Answer in at most ten words." },
+    store,
+    runId: "shorter",
+  });
+
+  const cmp = compareRuns("baseline", "shorter", store);
+
+  assert.equal(cmp.divergedAt, 4);
+  assert.deepEqual(cmp.pairs[4]?.asked, { kind: "moved", facets: ["system"] });
+});
+
+test("a fork that changed only the answer parted on a question that did not move", async () => {
+  const store = new MemoryStore();
+  await recordBaseline(store);
+  await forkAt2(store, "forked", "a shorter ending");
+
+  const cmp = compareRuns("baseline", "forked", store);
+
+  // The requests at step 2 are the same request, digest for digest: this fork
+  // swapped the provider and nothing the model was asked. What separates the
+  // two runs is on the answering side, which is the one reading of a divergence
+  // no single log can offer.
+  assert.deepEqual(cmp.pairs[4]?.asked, { kind: "same" });
+});
+
+test("a tool answering one input two ways is told apart from a run that asked something else", async (t) => {
+  const dir = tempDir(t);
+  const store = new RunStore(dir);
+  await recordBaseline(store, "before");
+  await run("explain alpha and beta", {
+    agent,
+    provider: new MockProvider(script()),
+    tools: [
+      tool({
+        ...lookup,
+        run: (input: { term: string }) => `definition of ${input.term}, revised`,
+      }),
+    ],
+    store,
+    runId: "after",
+  });
+
+  const cmp = compareRuns("before", "after", store);
+
+  assert.equal(cmp.kinship.kind, "unrelated");
+  assert.equal(cmp.divergedAt, 1, "the model said the same thing; the corpus did not");
+  assert.deepEqual(cmp.pairs[1]?.asked, { kind: "same" });
+
+  const io = capture();
+  const code = await main(["diff", "before", "after", "--dir", dir], io);
+
+  assert.equal(code, 0, io.errors());
+  assert.match(io.text(), /1 ≠ tool:step:0#0:lookup — same call, same question, different answer/);
+  assert.match(io.text(), /the tool answered one input two ways/);
+});
+
+test("a value a run was told to serve is not a question that moved", async (t) => {
+  const dir = tempDir(t);
+  const store = new RunStore(dir);
+  await recordBaseline(store);
+  await fork("baseline", {
+    provider: new MockProvider([{ content: [text("nothing to go on")] }]),
+    tools: [lookup],
+    atStep: 2,
+    overrides: { "step:0#0:lookup": "no results" },
+    store,
+    runId: "counterfactual",
+  });
+
+  const cmp = compareRuns("baseline", "counterfactual", store);
+
+  assert.equal(cmp.divergedAt, 1);
+  assert.equal(cmp.excused, 1);
+  assert.equal(cmp.pairs[1]?.asked, undefined, "a substituted value answers no question");
+  // The substitution's reach is the part worth seeing: the live step above it
+  // was asked something the parent never asked, and says which component.
+  assert.deepEqual(cmp.pairs[4]?.asked, { kind: "moved", facets: ["conversation"] });
+
+  const io = capture();
+  const code = await main(["diff", "baseline", "counterfactual", "--dir", dir], io);
+
+  assert.equal(code, 0, io.errors());
+  assert.match(io.text(), /1 ≠ tool:step:0#0:lookup — same call, a value one of them was told to serve/);
+  assert.match(io.text(), /4 ≠ model:step:2 — same call, asked something else — conversation/);
+  assert.doesNotMatch(io.text(), /^asked/m, "there is no question behind a value someone set");
+});
+
+test("a call recorded before digests existed leaves the question unsettled rather than guessed at", async (t) => {
+  const dir = tempDir(t);
+  const store = new RunStore(dir);
+  await recordBaseline(store);
+  await forkAt2(store, "forked", "a shorter ending");
+
+  const bare = tampered(
+    store.read("forked"),
+    (e) => e.type === "effect" && e.kind === "model" && e.key === "step:2",
+    (e) => {
+      if (e.type !== "effect") return;
+      delete e.requestHash;
+      delete e.requestFacets;
+    },
+  );
+
+  const cmp = compareEvents("baseline", store.read("baseline"), "forked", bare);
+
+  assert.equal(cmp.pairs[4]?.asked?.kind, "unknown");
+  assert.match(
+    cmp.pairs[4]?.asked?.kind === "unknown" ? cmp.pairs[4].asked.why : "",
+    /before a call carried a digest/,
+  );
+
+  writeFileSync(
+    join(dir, "runs", "forked.jsonl"),
+    `${bare.map((e) => JSON.stringify(e)).join("\n")}\n`,
+    "utf8",
+  );
+  const io = capture();
+
+  const code = await main(["diff", "baseline", "forked", "--dir", dir], io);
+
+  assert.equal(code, 0, io.errors());
+  assert.match(io.text(), /4 ≠ model:step:2 — same call, different result/);
+  assert.match(io.text(), /asked\s+not something these two logs settle/);
+});
+
+test("a fetch answered two ways at one slot is the world moving, unless the body was never read", async (t) => {
+  for (const [body, expected] of [
+    [undefined, "same"],
+    [new FormData(), "unknown"],
+  ] as const) {
+    const store = new MemoryStore();
+    for (const [runId, answer] of [
+      ["first", "three hits"],
+      ["second", "five hits"],
+    ]) {
+      const stub = stubFetch(() => new Response(answer, { status: 200 }));
+      t.after(stub.restore);
+      await run("what does the corpus say", {
+        agent,
+        provider: new MockProvider([
+          { content: [toolUse("t1", "ask", { term: "alpha" })] },
+          { content: [text(`the corpus says ${answer}`)] },
+        ]),
+        tools: [asks(body)],
+        store,
+        runId,
+      });
+      stub.restore();
+    }
+
+    const cmp = compareRuns("first", "second", store);
+    const fetched = cmp.pairs.find((p) => p.a?.kind === "fetch");
+
+    assert.equal(fetched?.verdict, "value", "the corpus answered the two runs differently");
+    assert.equal(fetched?.asked?.kind, expected);
+  }
+});
+
+/** A tool that asks the corpus through `ctx.fetch`, optionally posting `body`. */
+function asks(body: BodyInit | undefined) {
+  return tool({
+    name: "ask",
+    description: "Ask the corpus about a term. Call this when the answer depends on a fact.",
+    inputSchema: objectSchema({ term: { type: "string" } }),
+    run: async (input: { term: string }, ctx) => {
+      const res = await ctx.fetch(
+        `https://corpus.test/?q=${input.term}`,
+        body === undefined ? undefined : { method: "POST", body },
+      );
+      return res.text();
+    },
+  });
+}
+
+/** A `fetch` that never leaves the process. Every run here is offline, on purpose. */
+function stubFetch(answer: () => Response) {
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => answer()) as typeof globalThis.fetch;
+  return {
+    restore: () => {
+      globalThis.fetch = real;
+    },
+  };
+}
 
 test("diff without two run ids says so instead of guessing", async (t) => {
   const io = capture();
