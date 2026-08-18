@@ -512,6 +512,71 @@ for step 3, which ran live against the new world; steps 1 and 2 are the old
 world's answers, kept for their price. Fork lower to make more of the run
 respond to the change, and pay for more of it.
 
+## How far down it has to go
+
+*Fork lower* is easy to say and tedious to do. You fork at step 7, read the
+same answer back, fork at 5, read it back again, fork at 3 — and the question
+you were asking across all of that was never about any one fork point. It was
+*how far down does this change have to go before it takes*.
+
+`search` asks it by going there, downward, stopping at the first fork point that
+answers differently:
+
+```bash
+retrace search demo-original --module ./agent-module.ts
+```
+
+```
+demo-original  completed  · 4 steps
+analyst · claude-opus-5 · forking from step 3 down, until the answer is not the recorded one
+
+  step 3   same     $0.2300 billed · $0.6900 free
+           The market is large, contested, and priced per seat.
+  step 2   differs  $0.4600 billed · $0.4600 free
+           Large market. Crowded. Per-seat pricing.
+
+found at step 2 search_20260818T1204_9a1c
+  the highest fork point this change takes at — above it the run answered the same
+  2 forks · $0.6900 billed · $1.1500 not spent again out of $1.8400
+```
+
+Downward is the direction that makes this cheap, and it is not an implementation
+detail. The highest fork point is the one with the most of the run already paid
+for, so the search spends least on the answer you most want to be true — that
+the change takes at the top — and only pays for a deeper prefix once a shallower
+one has been ruled out. Every trial is a real run in the store, so `show`,
+`diff` and `verify` all work on the one it found, and `tree` draws the whole
+search under the run it came from.
+
+The last line is the arithmetic of the thing. Two forks, and neither of them
+re-ran the steps below where it cut; answering the same question by re-running
+the agent twice is the `$1.8400`.
+
+By default it is looking for an answer that is not the recorded one, which is the
+question "did my change take at all". `--until` takes a regular expression when
+you know what you want it to say instead:
+
+```bash
+retrace search demo-original --module ./agent-module.ts --until 'per seat'
+```
+
+Three bounds keep it from wandering. `--at N` starts the walk at a step other
+than the last one, `--down-to N` stops it above step 0, and `--max-forks N` caps
+what it will spend however far it got. It exits non-zero when the search comes up
+empty, so it works as a gate, and says which fork points it never tried rather
+than reporting a bounded search as an exhausted one.
+
+Two things it will not do. A fork that did not *complete* is never a match,
+whatever the predicate says — a run that stopped on a budget, a limit or a throw
+did not answer, so there is nothing for a predicate to be true about, and it is
+printed with the state it stopped in. And a search carrying `--set` has a floor:
+below the step the substituted effect was recorded at, the run consults the world
+rather than the log, so the value would not be served at all. `fork` refuses that
+outright; `search` reports the floor and stops there, rather than walking into
+the refusal.
+
+In code it is `searchForkPoints(runId, { provider, tools, until })`.
+
 ## Reading the network
 
 The largest thing a tool does that a log could not follow used to be the one
@@ -825,6 +890,7 @@ retrace fork <run-id> --at N  # replay the steps below N, then run live
 retrace fork … --at <key>     # …or re-enter mid-step, at one recorded call
 retrace fork … --set k=v      # …serving v in place of the effect recorded at k
 retrace plan <run-id> --at N  # what that fork would replay, save and go stale on
+retrace search <run-id>       # …fork downward until the change takes, cheapest first
 retrace resume <run-id>       # carry on a run that stopped early, from its log
 retrace stale <run-id>        # what moved under the steps it replayed, and to what
 retrace report <run-id>       # write the run as one self-contained HTML page
@@ -1546,13 +1612,27 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   that the network is the only thing a disagreement can be about, which is what
   makes a tool that reads the world through `ctx.fetch` the tool this command
   can be precise about.
+- **`search` answers a question by making the forks, and the forks are real.**
+  Every trial executes its live tail for real, so a search across a run with an
+  unmarked `send_email` in it sends the mail once per fork it makes — the same
+  hazard as forking past one, arriving as many times as the search descends, and
+  `irreversible` is the mark that stops it. What it walks is steps, not the fork
+  points inside them: the calls within a step are not a sequence to descend, and
+  `--at` on this command is a step for that reason. The fork point it reports is
+  the highest one *it tried* that satisfied the predicate — with `--at` or
+  `--max-forks` given, that is a fact about the search as much as about the run,
+  and the closing line says which fork points went untried rather than letting a
+  bounded search read as an exhausted one. A predicate is only ever asked about a
+  fork that completed. And nothing here assumes the answer moves monotonically
+  with depth: the walk tries each fork point in turn and stops at the first that
+  holds, which is why it is a descent rather than a bisection.
 - **An override is a counterfactual for the steps above it and nothing else.** Replacing a value changes what the live steps see; the replayed steps between it and the fork point still come out of the log as recorded, and are marked `stale` for it — the model calls on `conversation`, and any tool call whose input the substitution moved on `input`. The fork's log is a truthful record of a run that answered a question its parent never asked — it is not a record of what the parent would have done, because nothing re-ran to find out.
 
 ## Status
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
 one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads — what it asked, body and all, and what came back — inside the boundary, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log and the `conclusion` check that holds a run's reported answer and ending to the response its log ends on, the `diff` comparison that holds two logs to the prefix they claim from the same source and says whether the two runs were asking the same thing where they parted, and the `recheck` re-execution including its `unstable` finding, the watch on the
-ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, and the `tree` view that draws a store as the family of runs it actually is — is covered by 415 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, the `tree` view that draws a store as the family of runs it actually is, and the `search` walk that forks downward until a change takes and reports the cheapest fork point it did — is covered by 434 tests that run without network access. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -1560,7 +1640,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 415 tests, no network, no API key
+npm test           # 434 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

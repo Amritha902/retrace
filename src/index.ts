@@ -131,6 +131,12 @@ export {
   type ToolOutcome,
 } from "./recheck.ts";
 export { renderReport } from "./report.ts";
+export {
+  searchForkPoints,
+  type SearchOptions,
+  type SearchReport,
+  type SearchTrial,
+} from "./search.ts";
 export { DEFAULT_STORE_DIR, MemoryStore, RunStore, fingerprint, newRunId } from "./store.ts";
 export { objectSchema, tool, type ToolDefinition } from "./tools.ts";
 export {

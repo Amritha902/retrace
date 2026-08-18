@@ -24,6 +24,7 @@ import {
 } from "./replay.ts";
 import { executed, recheckRun, type RecheckReport, type RecheckStatus } from "./recheck.ts";
 import { renderReport } from "./report.ts";
+import { searchForkPoints } from "./search.ts";
 import { DEFAULT_STORE_DIR, RunStore } from "./store.ts";
 import { lineageTrees, type TreeRun } from "./tree.ts";
 import { verifyRun } from "./verify.ts";
@@ -44,6 +45,8 @@ const USAGE = `retrace — inspect and re-run recorded agent runs
                                 (--at <effect-key> re-enters mid-step instead)
   retrace plan <run-id> --at N  what that fork would replay, save and go stale
                                 on, before any of it is paid for
+  retrace search <run-id>       fork downward until a change takes, and say at
+                                which step it did and what the search cost
   retrace resume <run-id>       carry on a run that stopped early, from its log
   retrace stale <run-id>        say what moved under the steps it replayed, by
                                 reading the run it replayed them from
@@ -61,7 +64,14 @@ Options
   --at <n|effect-key>       where a fork starts executing for real: a step
                             number, or an effect key as show prints it, which
                             replays the rest of that step and goes live at the
-                            call itself — "step:2#1:search"
+                            call itself — "step:2#1:search". For search it is
+                            the first, highest fork point tried
+  --until <pattern>         what search is looking for: a regular expression the
+                            fork's answer must match. Without it, search stops
+                            at the first fork point whose answer is not the
+                            recorded one
+  --down-to <n>             the lowest fork point search may try (default 0)
+  --max-forks <n>           give up after this many forks, whatever --down-to says
   -o, --out <path>          where report writes its HTML or export its bundle;
                             "-" for stdout (default: <run-id>.html, and
                             <run-id>.bundle.jsonl)
@@ -124,6 +134,9 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
   const overrides = readOverrides(takeEvery(args, "--set"));
   const onDivergence = readPolicy(takeOption(args, "--on-divergence"));
   const only = takeEvery(args, "--tool");
+  const until = takeOption(args, "--until");
+  const downTo = readCount(takeOption(args, "--down-to"), "--down-to");
+  const maxForks = readCount(takeOption(args, "--max-forks"), "--max-forks");
   const allowIrreversible = takeFlag(args, "--allow-irreversible");
   const reentry: Reentry = { overrides, onDivergence, allowIrreversible };
 
@@ -147,6 +160,13 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       return cmdFork(io, store, rest[0], atRaw, modulePath, reentry);
     case "plan":
       return cmdPlan(io, store, rest[0], atRaw, modulePath, reentry);
+    case "search":
+      return cmdSearch(io, store, rest[0], modulePath, reentry, {
+        atRaw,
+        until,
+        downTo,
+        maxForks,
+      });
     case "resume":
       return cmdResume(io, store, rest[0], modulePath, reentry);
     case "stale":
@@ -888,6 +908,113 @@ async function cmdPlan(
 }
 
 /**
+ * How far down a change has to go, found by going there.
+ *
+ * `fork` answers one fork point at a time, and the question a person is usually
+ * asking across several of them is which one they needed. Walking downward is
+ * what makes that cheap: the highest fork point has the most of the run already
+ * paid for, so the search spends least on the answer it is most likely to want,
+ * and stops the moment one holds.
+ */
+async function cmdSearch(
+  io: Io,
+  store: RunStore,
+  runId: string | undefined,
+  modulePath: string | undefined,
+  { overrides, onDivergence, allowIrreversible }: Reentry,
+  bounds: {
+    atRaw: string | undefined;
+    until: string | undefined;
+    downTo: number | undefined;
+    maxForks: number | undefined;
+  },
+): Promise<number> {
+  if (!runId) return fail(io, "search needs a run id");
+  if (modulePath === undefined) {
+    return fail(io, "search needs --module <path>: every fork it makes runs a step live");
+  }
+  // A search descends over steps, so `--at` here is a step and never an effect
+  // key: the fork points between two steps are not a sequence to walk down.
+  const from = readCount(bounds.atRaw, "--at (search starts at a step)");
+  const until = bounds.until === undefined ? undefined : new RegExp(bounds.until);
+
+  const parent = inspect(runId, store);
+  const mod = await loadRunModule(modulePath);
+  const agent = { ...parent.agent, ...mod.agent };
+  const top = Math.min(from ?? parent.steps - 1, parent.steps - 1);
+
+  io.out(`${bold(runId)}  ${statusLabel(parent.status)}  ${dim(`· ${plural(parent.steps, "step")}`)}\n`);
+  io.out(
+    dim(
+      `${agent.name} · ${agent.model} · forking from step ${top} down, until the answer ` +
+        `${until === undefined ? "is not the recorded one" : `matches /${until.source}/`}\n\n`,
+    ),
+  );
+
+  const report = await searchForkPoints(runId, {
+    provider: mod.provider ?? (await anthropic()),
+    tools: mod.tools ?? [],
+    agent: mod.agent,
+    input: mod.input,
+    budget: mod.budget,
+    store,
+    overrides,
+    onDivergence: onDivergence ?? "strict",
+    allowIrreversible,
+    ...(from === undefined ? {} : { from }),
+    ...(bounds.downTo === undefined ? {} : { downTo: bounds.downTo }),
+    ...(bounds.maxForks === undefined ? {} : { maxForks: bounds.maxForks }),
+    ...(until === undefined ? {} : { until: (result) => until.test(result.output) }),
+    onTrial: (trial) => {
+      const verdict = trial.matched
+        ? green(until === undefined ? "differs" : "matches")
+        : trial.status === "completed"
+          ? dim(until === undefined ? "same" : "no match")
+          : statusLabel(trial.status);
+      io.out(
+        `  ${`step ${trial.atStep}`.padEnd(8)} ${padLabel(verdict, 8)} ` +
+          dim(`${formatUsd(trial.billedUsd)} billed · ${formatUsd(trial.savedUsd)} free\n`),
+      );
+      io.out(`  ${" ".repeat(8)} ${dim(truncate(trial.error ?? trial.output, 62))}\n`);
+    },
+  });
+
+  if (report.tried.length === 0) {
+    io.out(
+      `${dim("nothing to try")}: step ${top} is not a fork point of a run with ` +
+        `${plural(parent.steps, "step")}\n`,
+    );
+    return 1;
+  }
+
+  io.out("\n");
+  if (report.found === undefined) {
+    io.out(
+      `${yellow("not found")}: ${plural(report.tried.length, "fork")} down to step ` +
+        `${report.downTo}, and the answer never ` +
+        `${until === undefined ? "moved off the recorded one" : `matched /${until.source}/`}\n`,
+    );
+    if (report.stopped !== undefined) io.out(`${dim(report.stopped)}\n`);
+  } else {
+    io.out(
+      `${green(`found at step ${report.found.atStep}`)} ${report.found.runId}\n` +
+        dim(
+          report.found.atStep === report.from
+            ? `  the first fork point tried, so nothing below it had to be\n`
+            : `  the highest fork point this change takes at — above it the run answered the same\n`,
+        ),
+    );
+  }
+  io.out(
+    dim(
+      `  ${plural(report.tried.length, "fork")} · ${formatUsd(report.billedUsd)} billed · ` +
+        `${formatUsd(report.savedUsd)} not spent again out of ${formatUsd(report.costUsd)}\n`,
+    ),
+  );
+  return report.found === undefined ? 1 : 0;
+}
+
+/**
  * Pick a run up where it stopped. The log replays whole and execution goes live
  * at the effect it ends on, so a run killed at step 9 of 12 costs nine steps
  * less to finish than starting it again.
@@ -1438,6 +1565,16 @@ function readForkPoint(raw: string): ForkPoint | undefined {
   const atStep = Number(raw);
   if (Number.isInteger(atStep) && atStep >= 0) return { atStep };
   return raw.includes(":") ? { atEffect: raw } : undefined;
+}
+
+/** A bound on a search: a step index or a number of forks, never negative. */
+function readCount(value: string | undefined, name: string): number | undefined {
+  if (value === undefined) return undefined;
+  const count = Number(value);
+  if (!Number.isInteger(count) || count < 0) {
+    throw new Error(`${name} takes a whole number of zero or more, got "${value}"`);
+  }
+  return count;
 }
 
 function readPolicy(value: string | undefined): "strict" | "live" | undefined {

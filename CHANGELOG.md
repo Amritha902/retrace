@@ -40,6 +40,18 @@ publish contains rather than what changed since something.
   print. Nothing executes; there is no provider to give it. Above the fork point
   it describes nothing, because the model has not been asked yet, and without
   tools it reports the staleness unpredicted rather than guessing at it.
+- **`searchForkPoints`.** The question `fork` can only answer one point at a
+  time: how far down a change has to go before it takes. It walks a run's fork
+  points downward from its last step, forking at each and stopping at the first
+  whose answer satisfies the predicate — by default an answer that is not the
+  recorded one, or a regular expression given as `until`. Downward is what makes
+  it cheap: the highest fork point has the most of the run already paid for, so
+  a deeper prefix is only paid for once a shallower one is ruled out. Every
+  trial is a real run in the store, and the report totals what the search billed
+  against what the same trials would have cost as full re-runs. `from`, `downTo`
+  and `maxForks` bound it; a fork that did not complete is never a match; and a
+  search carrying overrides stops at the step below which the substituted value
+  would no longer be served, rather than walking into `fork`'s refusal.
 - **`resume`.** A run killed partway through is carried on from its log: the
   whole prefix replays and execution goes live at the effect the log ends on, so
   a process that died at step 9 of 12 finishes for the price of three steps. It
@@ -312,7 +324,8 @@ publish contains rather than what changed since something.
 ### The CLI
 
 `retrace ls`, `tree`, `show`, `cost`, `diff`, `replay`, `fork`, `plan`,
-`resume`, `stale`, `report`, `verify`, `recheck`, `export` and `import`.
+`search`, `resume`, `stale`, `report`, `verify`, `recheck`, `export` and
+`import`.
 `tree [run-id]` draws the family a run belongs to — every run forked, resumed or
 replayed from it, and from those — with what each one asked that the run above it
 did not: where it cut, what it was told to substitute, and which components moved
@@ -327,6 +340,11 @@ provider, and any agent overrides.
 executes none of it, and prints what that fork would replay, save, go stale on
 and refuse to run twice; it exits non-zero only on the last of those, so it works
 as a pre-flight check in front of a fork.
+`search <run-id> --module <path>` forks downward until the answer moves, printing
+each trial as it makes it and closing on the fork point it found, what the search
+billed and what it did not spend twice; `--until <pattern>` says what to look for
+instead of "not the recorded answer", `--at`, `--down-to` and `--max-forks` bound
+the walk, and it exits non-zero when nothing matched.
 `--set <effect-key>=<value>`, on `fork` and `replay`, is the counterfactual.
 `stale <run-id>` reads the run against the one it replayed from and prints both
 sides of everything that moved under its free prefix.
@@ -358,7 +376,7 @@ depend on.
 
 ### Verified by
 
-415 tests that run with no network and no API key, plus two `[live]` integration
+434 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:
