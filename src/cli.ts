@@ -27,6 +27,7 @@ import { executed, recheckRun, type RecheckReport, type RecheckStatus } from "./
 import { renderReport } from "./report.ts";
 import { searchForkPoints } from "./search.ts";
 import { DEFAULT_STORE_DIR, RunStore } from "./store.ts";
+import { sweepForkPoint, type SweepTrial } from "./sweep.ts";
 import { lineageTrees, type TreeRun } from "./tree.ts";
 import { verifyRun } from "./verify.ts";
 import type { ContentBlock, ForkOrigin, Provider, RetraceEvent } from "./types.ts";
@@ -48,6 +49,8 @@ const USAGE = `retrace — inspect and re-run recorded agent runs
                                 on, before any of it is paid for
   retrace search <run-id>       fork downward until a change takes, and say at
                                 which step it did and what the search cost
+  retrace sweep <run-id> --at N try several changes at one fork point, off one
+                                replayed prefix, and put the answers side by side
   retrace resume <run-id>       carry on a run that stopped early, from its log
   retrace stale <run-id>        say what moved under the steps it replayed, by
                                 reading the run it replayed them from
@@ -79,7 +82,8 @@ Options
   --module <path>           module exporting the live half of the run — tools,
                             a provider, and agent fields to override. Required
                             by fork and resume; replay only needs it to go past
-                            the log.
+                            the log. For sweep it also exports "arms", the
+                            variations to try at the fork point
   --set <key>=<value>       serve <value> in place of the effect recorded under
                             <key>, as show prints it — "step:2#0:search=nothing
                             found". Repeatable; the key must be below --at.
@@ -168,6 +172,8 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
         downTo,
         maxForks,
       });
+    case "sweep":
+      return cmdSweep(io, store, rest[0], atRaw, modulePath, reentry);
     case "resume":
       return cmdResume(io, store, rest[0], modulePath, reentry);
     case "stale":
@@ -1019,6 +1025,126 @@ async function cmdSearch(
     ),
   );
   return report.found === undefined ? 1 : 0;
+}
+
+/**
+ * Several changes at one fork point, off one replayed prefix.
+ *
+ * `search` fixes the change and varies the fork point; this varies the change
+ * and fixes the fork point, which is the shape the question usually has once
+ * you know where to cut. The arms are the module's, because they are code —
+ * prompts to try, values to substitute — and the run they re-enter supplies
+ * everything else.
+ */
+async function cmdSweep(
+  io: Io,
+  store: RunStore,
+  runId: string | undefined,
+  atRaw: string | undefined,
+  modulePath: string | undefined,
+  { overrides, onDivergence, allowIrreversible }: Reentry,
+): Promise<number> {
+  if (!runId) return fail(io, "sweep needs a run id");
+  if (atRaw === undefined) {
+    return fail(io, "sweep needs --at <step|effect-key>: where every arm starts running live");
+  }
+  const at = readForkPoint(atRaw);
+  if (at === undefined) {
+    return fail(
+      io,
+      `--at takes a step number or an effect key, got "${atRaw}" — a key looks like ` +
+        `"step:2#0:search", as show prints it`,
+    );
+  }
+  if (modulePath === undefined) {
+    return fail(io, "sweep needs --module <path>: the arms and the tools their live steps run");
+  }
+
+  const parent = inspect(runId, store);
+  const mod = await loadRunModule(modulePath);
+  if (mod.arms === undefined || mod.arms.length === 0) {
+    return fail(
+      io,
+      `module "${modulePath}" exports no arms — a sweep needs "arms", an array of ` +
+        `{ name, agent, overrides } saying what to try at ${atRaw}`,
+    );
+  }
+  const agent = { ...parent.agent, ...mod.agent };
+  const where = at.atEffect ?? `step ${at.atStep}`;
+
+  io.out(`${bold(runId)}  ${statusLabel(parent.status)}  ${dim(`· ${plural(parent.steps, "step")}`)}\n`);
+  io.out(
+    dim(
+      `${agent.name} · ${agent.model} · ${plural(mod.arms.length, "arm")} at ${where}, ` +
+        `off one replayed prefix\n\n`,
+    ),
+  );
+
+  const width = Math.max(...mod.arms.map((arm, i) => (arm.name ?? `arm ${i + 1}`).length), 8);
+  const report = await sweepForkPoint(runId, {
+    provider: mod.provider ?? (await anthropic()),
+    ...at,
+    tools: mod.tools ?? [],
+    agent: mod.agent,
+    input: mod.input,
+    budget: mod.budget,
+    arms: mod.arms,
+    store,
+    overrides,
+    onDivergence: onDivergence ?? "strict",
+    allowIrreversible,
+    onTrial: (trial) => printArm(io, trial, width),
+  });
+
+  io.out(`\n${controlLine(report.control)}\n`);
+  io.out(
+    dim(
+      `${plural(report.arms.length, "arm")} · ${formatUsd(report.billedUsd)} billed · ` +
+        `${formatUsd(report.savedUsd)} not spent again out of ${formatUsd(report.costUsd)}\n`,
+    ),
+  );
+  return report.control.ok && report.arms.every((a) => a.status === "completed") ? 0 : 1;
+}
+
+function printArm(io: Io, trial: SweepTrial, width: number): void {
+  const moved = trial.staleFacets.length > 0 ? dim(`  ${trial.staleFacets.join(", ")}`) : "";
+  const indent = `  ${" ".repeat(width)}  `;
+  io.out(
+    `  ${padLabel(trial.name, width)}  ${padLabel(statusLabel(trial.status), 10)} ` +
+      dim(`${formatUsd(trial.billedUsd)} billed · ${formatUsd(trial.savedUsd)} free`) +
+      `${moved}\n`,
+  );
+  // Each arm is a run of its own, and the name is only good inside this report
+  // — show, diff and verify want the id.
+  if (trial.runId !== undefined) io.out(`${indent}${dim(trial.runId)}\n`);
+  io.out(`${indent}${dim(truncate(trial.error ?? trial.output, 68))}\n`);
+}
+
+/**
+ * What the arms shared, which is the whole claim a sweep makes over running the
+ * agent once per arm: they differ in what was varied and in nothing below it.
+ */
+function controlLine(control: {
+  arms: number;
+  claimed: number;
+  excused: number;
+  contradiction?: string;
+  ok: boolean;
+}): string {
+  if (!control.ok) return `${red("not controlled")}: ${control.contradiction}`;
+  if (control.arms < 2) {
+    return dim(`one arm ran, so there was nothing to hold its prefix against`);
+  }
+  const substituted =
+    control.excused === 0
+      ? ""
+      : `, ${control.excused} of them ${control.excused === 1 ? "a value" : "values"} ` +
+        `an arm was told to substitute`;
+  return (
+    green("controlled") +
+    `: ${plural(control.claimed, "effect")} replayed identically by all ` +
+    `${plural(control.arms, "arm")}${substituted}`
+  );
 }
 
 /**

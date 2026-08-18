@@ -597,6 +597,79 @@ the refusal.
 
 In code it is `searchForkPoints(runId, { provider, tools, until })`.
 
+## Several changes at one point
+
+`search` fixes the change and varies the fork point. The other half of the same
+question is the one you ask once you know where to cut: *fix the fork point and
+vary the change*. Five prompts tried at step 7 of a twelve-step run is five live
+tails, not five runs — that is what the free prefix was for, and `sweep` is the
+command that spends it that way.
+
+The arms come from the module, because they are code: prompts to try, values to
+substitute.
+
+```ts
+// agent-module.ts
+export const tools = [search];
+export const provider = new AnthropicProvider();
+export const arms = [
+  { name: "terse", agent: { system: "You are a research analyst. Answer in ten words." } },
+  { name: "cited", agent: { system: "You are a research analyst. Cite what you searched." } },
+  { name: "empty-corpus", overrides: { "step:0#0:search": "no results" } },
+];
+```
+
+```
+$ retrace sweep demo-original --at 3 --module ./agent-module.ts
+
+demo-original  completed  · 4 steps
+analyst · claude-opus-5 · 3 arms at step 3, off one replayed prefix
+
+  terse         completed  $0.2300 billed · $0.6900 free  system
+                sweep_20260818T1204_6c138cb4
+                Large market. Crowded. Per-seat pricing.
+  cited         completed  $0.2400 billed · $0.6900 free  system
+                sweep_20260818T1204_ddc7db38
+                The market is large and contested (market size, competitors).
+  empty-corpus  completed  $0.2200 billed · $0.6900 free  conversation
+                sweep_20260818T1204_64d5ef86
+                Market size unknown. Crowded. Per-seat pricing.
+
+controlled: 6 effects replayed identically by all 3 arms, 1 of them a value an arm was told to substitute
+3 arms · $0.6900 billed · $2.0700 not spent again out of $2.7600
+```
+
+Two lines are worth more than the answers. The last is the arithmetic: three
+answers for the price of three steps, where three runs would have been three
+whole runs.
+
+The other is `controlled`, and it is the claim a sweep makes that running the
+agent three times cannot. Every arm cut the same log at the same point, so below
+it they cannot hold different values — and that is checkable from the arms' own
+logs, without the run they came from. The arms are siblings, which is a
+relationship [`diff` already holds two runs to](#checking-two-logs-against-each-other),
+so the line is that check run over a set: the arms differ in what you varied and
+in nothing underneath it. The one exception is on record too — an arm that
+substituted a value is *meant* to differ there, so those positions are counted
+and named rather than quietly passed.
+
+The column beside the money is each arm saying what its own change moved:
+`system` for a rewritten prompt, `conversation` for a rewritten world. It is the
+same [staleness](#what-a-replayed-step-is-still-answering) a fork reports,
+read across the set — so an arm that reports something you did not vary is the
+one to look at first.
+
+The arms run one after another, not at once. The prefix is free either way, but
+the live tails execute tools, and a sweep is not the place to introduce a
+concurrency the recorded run never had. An arm the runtime refuses — the usual
+one is an [override the fork point would serve to
+nobody](#what-if-it-had-said-something-else) — comes back `not_run` with the
+reason, and the rest of the sweep goes ahead without it. Every arm is a real run
+in the store, so `show`, `diff` and `verify` all work on the one that answered
+best, and `tree` draws the whole sweep under the run it came from.
+
+In code it is `sweepForkPoint(runId, { provider, tools, atStep, arms })`.
+
 ## Reading the network
 
 The largest thing a tool does that a log could not follow used to be the one
@@ -958,6 +1031,7 @@ retrace fork … --at <key>     # …or re-enter mid-step, at one recorded call
 retrace fork … --set k=v      # …serving v in place of the effect recorded at k
 retrace plan <run-id> --at N  # what that fork would replay, save and go stale on
 retrace search <run-id>       # …fork downward until the change takes, cheapest first
+retrace sweep <run-id> --at N # …or try several changes at one point, off one prefix
 retrace resume <run-id>       # carry on a run that stopped early, from its log
 retrace stale <run-id>        # what moved under the steps it replayed, and to what
 retrace report <run-id>       # write the run as one self-contained HTML page
@@ -1008,6 +1082,9 @@ retrace fork demo-original --at 'step:2#2:search' --module ./agent-module.ts
 inside a step](#forking-inside-a-step). `retrace plan` takes the same two
 options, executes none of it, and says what that fork would replay, save and go
 stale on — see [the fork you haven't run yet](#the-fork-you-havent-run-yet).
+`retrace sweep` takes them too, and one more thing from the module: `arms`, the
+changes to try at that fork point — see [several changes at one
+point](#several-changes-at-one-point).
 
 Named exports and a `default` object both work. The file is imported for its exports, so it must not run anything at import time — see `examples/research.ts`, which guards its runner behind an entry-point check for exactly that reason. `--module` is optional for `replay`, and only matters there if the log stops short of the run it recorded.
 
@@ -1780,13 +1857,24 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   fork that completed. And nothing here assumes the answer moves monotonically
   with depth: the walk tries each fork point in turn and stops at the first that
   holds, which is why it is a descent rather than a bisection.
+- **`sweep` makes the forks too, and its `controlled` line is about the prefix
+  rather than the answers.** Every arm executes its own live tail for real, so
+  the `irreversible` hazard above arrives once per arm; the arms run in sequence
+  rather than at once, so their side effects land in the order the arms are
+  declared. What the closing line claims is that the arms held the prefix below
+  the fork point identically — a fact about the effects they replayed, and one
+  that says nothing about the answers they gave. Two arms that vary a prompt and
+  answer the same are a change that did not take; two that answer differently
+  with nothing varied between them are the model's own temperature. `diff` on
+  the two runs is what separates those, and `search` is what asks how far down
+  the change would have to go to take.
 - **An override is a counterfactual for the steps above it and nothing else.** Replacing a value changes what the live steps see; the replayed steps between it and the fork point still come out of the log as recorded, and are marked `stale` for it — the model calls on `conversation`, and any tool call whose input the substitution moved on `input`. The fork's log is a truthful record of a run that answered a question its parent never asked — it is not a record of what the parent would have done, because nothing re-ran to find out.
 
 ## Status
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
 one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads — what it asked, body and all, and what came back — inside the boundary, the `ctx.read` that does the same for the database queries, subprocesses and native clients no wrapper can intercept, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log, the `reads` check that holds every journaled read to the call that made it and to the question its own slot is a digest of, and the `conclusion` check that holds a run's reported answer and ending to the response its log ends on, the `diff` comparison that holds two logs to the prefix they claim from the same source and says whether the two runs were asking the same thing where they parted, and the `recheck` re-execution including its `unstable` finding, the watch on the
-ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, the `tree` view that draws a store as the family of runs it actually is, and the `search` walk that forks downward until a change takes and reports the cheapest fork point it did — is covered by 462 tests that run without network access — including a seeded property check that generates dozens of run shapes and holds each of them to the two guarantees the runtime rests on: a replay reproduces the log effect for effect and executes nothing, and a pure-tools fork at every step reproduces its parent. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, the `tree` view that draws a store as the family of runs it actually is, the `search` walk that forks downward until a change takes and reports the cheapest fork point it did, and the `sweep` that tries several changes at one fork point off one replayed prefix and holds the arms to the prefix they shared — is covered by 476 tests that run without network access — including a seeded property check that generates dozens of run shapes and holds each of them to the two guarantees the runtime rests on: a replay reproduces the log effect for effect and executes nothing, and a pure-tools fork at every step reproduces its parent. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -1794,7 +1882,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 462 tests, no network, no API key
+npm test           # 476 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

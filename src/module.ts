@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import type { SweepArm } from "./sweep.ts";
 import type { AgentSpec, BudgetSpec, Provider, Tool } from "./types.ts";
 
 /**
@@ -15,6 +16,12 @@ export interface RunModule {
   agent?: Partial<AgentSpec>;
   input?: string;
   budget?: BudgetSpec;
+  /**
+   * The variations `retrace sweep` tries at one fork point. Each is merged over
+   * `agent` and `overrides` above, so the module says what the run is and the
+   * arms say what is being varied about it.
+   */
+  arms?: SweepArm[];
 }
 
 /**
@@ -43,7 +50,33 @@ export async function loadRunModule(path: string): Promise<RunModule> {
     agent: readObject(path, "agent", pick("agent")) as Partial<AgentSpec> | undefined,
     input: readString(path, "input", pick("input")),
     budget: readObject(path, "budget", pick("budget")) as BudgetSpec | undefined,
+    arms: readArms(path, pick("arms")),
   };
+}
+
+function readArms(path: string, value: unknown): SweepArm[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new Error(
+      `module "${path}" exports "arms" as ${typeName(value)}; expected an array of ` +
+        `{ name, agent, overrides } to try at the fork point`,
+    );
+  }
+  return value.map((entry, i) => {
+    const arm = asRecord(entry);
+    if (!arm) {
+      throw new Error(
+        `module "${path}" exports arms[${i}] as ${typeName(entry)}; expected an object with ` +
+          `a name and something to vary — an "agent" to change, or "overrides" to substitute`,
+      );
+    }
+    return {
+      name: readString(path, `arms[${i}].name`, arm["name"]),
+      agent: readObject(path, `arms[${i}].agent`, arm["agent"]) as Partial<AgentSpec> | undefined,
+      input: readString(path, `arms[${i}].input`, arm["input"]),
+      overrides: readObject(path, `arms[${i}].overrides`, arm["overrides"]),
+    };
+  });
 }
 
 function readTools(path: string, value: unknown): Tool[] | undefined {

@@ -140,6 +140,15 @@ export {
   type SearchTrial,
 } from "./search.ts";
 export { DEFAULT_STORE_DIR, MemoryStore, RunStore, fingerprint, newRunId } from "./store.ts";
+export {
+  sweepForkPoint,
+  type ArmStatus,
+  type SweepArm,
+  type SweepControl,
+  type SweepOptions,
+  type SweepReport,
+  type SweepTrial,
+} from "./sweep.ts";
 export { objectSchema, tool, type ToolDefinition } from "./tools.ts";
 export {
   lineageTrees,

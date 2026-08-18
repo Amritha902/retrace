@@ -52,6 +52,20 @@ publish contains rather than what changed since something.
   and `maxForks` bound it; a fork that did not complete is never a match; and a
   search carrying overrides stops at the step below which the substituted value
   would no longer be served, rather than walking into `fork`'s refusal.
+- **`sweepForkPoint`.** The other half of the same question: fix the fork point
+  and vary the change. It forks a run once per arm — an arm being an agent to
+  change, a value to substitute, or an input to replace — so five prompts tried
+  at step 7 of a twelve-step run cost five live tails rather than five runs, and
+  the report totals what that saved. Every arm is a real run in the store, and
+  each carries the components its own change moved, so the report says which arm
+  rewrote the prompt and which rewrote the world. The claim a sweep makes over
+  running the agent once per arm is that the arms are a controlled experiment,
+  and it is checked rather than asserted: the arms are siblings, `compareRuns`
+  already knows what siblings owe each other, and the report says how many
+  effects every arm replayed identically and how many of those were values an
+  arm was told to substitute. An arm the runtime refuses — an override this fork
+  point would serve to nobody is the one that happens — is reported `not_run`
+  with the reason, and the other arms still run.
 - **`resume`.** A run killed partway through is carried on from its log: the
   whole prefix replays and execution goes live at the effect the log ends on, so
   a process that died at step 9 of 12 finishes for the price of three steps. It
@@ -365,8 +379,8 @@ publish contains rather than what changed since something.
 ### The CLI
 
 `retrace ls`, `tree`, `show`, `cost`, `diff`, `replay`, `fork`, `plan`,
-`search`, `resume`, `stale`, `report`, `verify`, `recheck`, `export` and
-`import`.
+`search`, `sweep`, `resume`, `stale`, `report`, `verify`, `recheck`, `export`
+and `import`.
 `tree [run-id]` draws the family a run belongs to — every run forked, resumed or
 replayed from it, and from those — with what each one asked that the run above it
 did not: where it cut, what it was told to substitute, and which components moved
@@ -386,6 +400,11 @@ each trial as it makes it and closing on the fork point it found, what the searc
 billed and what it did not spend twice; `--until <pattern>` says what to look for
 instead of "not the recorded answer", `--at`, `--down-to` and `--max-forks` bound
 the walk, and it exits non-zero when nothing matched.
+`sweep <run-id> --at <n|effect-key> --module <path>` tries the module's `arms` at
+one fork point, printing each arm's answer, the run it made and what its change
+moved, and closing on how much of the prefix all of them replayed identically
+and what the set of them did not spend again. It exits non-zero when an arm did
+not complete or the arms disagree below the fork point.
 `--set <effect-key>=<value>`, on `fork` and `replay`, is the counterfactual.
 `stale <run-id>` reads the run against the one it replayed from and prints both
 sides of everything that moved under its free prefix.
@@ -417,7 +436,7 @@ depend on.
 
 ### Verified by
 
-434 tests that run with no network and no API key, plus two `[live]` integration
+476 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:
