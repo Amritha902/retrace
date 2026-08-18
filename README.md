@@ -462,6 +462,26 @@ you give them as-is. The substituted value goes in the fork's log marked
 `overridden`, so the log holds what the run actually saw *and* says it was not
 what the parent recorded.
 
+A [read of the world](#reading-the-network) takes the same shape one step in:
+what you are replacing is the answer, never the question. The request a
+`ctx.fetch` made and the source and question a `ctx.read` named are facts about
+the call, and the slot the answer is served from is a digest of them — so they
+survive the substitution, and the log goes on saying what the replaced answer is
+an answer *to*. Bare text is a fetch's body with the rest of the recorded
+response kept, since "what if the corpus had said something else" should not
+also cost you its status and its content type; an object names the fields it
+replaces, so `{"status":503,"body":""}` is a corpus that was down.
+
+```bash
+retrace fork read --at 'step:0#0:search' --set 'step:0#0:search/fetch:0:5d8f110cfaa9={"hits":[]}'
+```
+
+Overriding a fetch or a read wants a fork point *inside* the step, and for the
+reason [that section](#forking-inside-a-step) gives: these are reads a tool made,
+so the tool has to execute for the substitution to reach anything. Fork at the
+step above and the call is replayed along with its reads, and the value you
+supplied sits in the log with nothing to tell.
+
 The mark stays on the run that was given the instruction. Fork *that* run and the
 value is inherited like any other recorded value — a descendant claiming a
 substitution nobody asked it for would be saying something false about itself —
@@ -1100,6 +1120,8 @@ forked from demo-original at step 3
 
   ok   shape        24 events, 7 effects, indices dense and in order
   ok   requests     7 calls answer the request this log rebuilds, digest for digest
+  ok   reads        no tool in this log read a clock, an id, an RNG, the network or a source
+                    through ctx
   ok   conclusion   completed on "Large market. Crowded. Per-seat pricing.", which is
                     the response the log ends on
   ok   accounting   $0.9200 at list price, $0.2300 billed, $0.6900 saved — the charges add up
@@ -1204,6 +1226,51 @@ A check it cannot run — a lineage that leaves this store, a killed run with no
 totals yet — comes back skipped rather than passed, traced as far as it goes, and
 the last line says how much of the verification that leaves undone. In code it is
 `verifyRun(runId)`.
+
+### The half of a log nothing was reading
+
+`requests` walks the model and tool calls and stops there, because that is as far
+as a conversation reaches: a `ctx.fetch` or a `ctx.read` is asked for by neither
+the model nor a response. So in a run whose tools read the world — the runs the
+whole [`ctx.fetch`](#reading-the-network) and [`ctx.read`](#reading-everything-else)
+story is for — most of the effects in the log were held to nothing at all.
+
+They need no conversation rebuilt, because each one already carries both halves.
+The slot a read is served from is a digest of what it asked, and what it asked is
+recorded beside the answer. Build the key back out of the value and the two
+either agree or somebody has been at the log:
+
+```
+  fail reads        step:0#0:search/fetch:0:5d8f110cfaa9 holds a response to GET
+                    https://corpus.test/search?q=cost, which is not what its own slot
+                    is a digest of
+```
+
+That is a recorded response moved under a request the run never made, and it is
+exactly the value a fork is served *past* its fork point — the key table
+[outlives the cut](#time-ids-and-randomness) on purpose, so a doctored response
+is a doctored world for the live tail of every run below it. On the run at the
+top of a lineage it is an edit `parent` has nothing to compare against, which is
+the same gap `requests` was built to close, on the other half of the log.
+
+The rest of it is the shape a read has to have: every one sits inside a tool call
+this log actually records, at that call's step, and holds the slot that call
+handed it — so a read moved under a call that never made it, or one whose
+ordinal skips a read recorded before it, is named rather than counted. A clock,
+an id and a random draw are answers to no question and carry no digest, so those
+are held to the call and the slot and nothing further.
+
+```
+  ok   reads        4 journaled reads sit in the calls that made them; 2 hold the
+                    question their own slot is a digest of
+```
+
+What it does not say is that a recorded answer is still *true*. The digest covers
+the question, exactly as [a tool call's does](#what-a-replayed-step-is-still-answering):
+edit the body of a recorded response rather than the request above it and this
+check passes, correctly, because the log is then a consistent record of a corpus
+saying something else. [`recheck`](#checking-a-log-against-the-world) is what
+executes the call and finds out.
 
 ### The line a person actually reads
 
@@ -1637,6 +1704,29 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   also not an accusation: a run that was *served* an edited value and built its
   requests around it verifies clean, correctly, because its log is a truthful
   record of the run it had. In code it is `rebuildRequests(events)`.
+- **`reads` holds the other half of a log the same way, and needs no rebuilding
+  to.** A `ctx.fetch` and a `ctx.read` are asked for by neither the model nor a
+  response, so `requests` never reaches them and in a run whose tools read the
+  world most of the log was checked by nothing. Each one carries both halves
+  already: the slot it is served from is a digest of what it asked, and what it
+  asked is recorded beside the answer, so the key is rebuilt from the value and
+  compared. It also holds every journaled read — the clock, ids and randomness
+  included — to the tool call that made it, that call's step, and the slot that
+  call handed out, so an orphan or a missing read is named. What it cannot say
+  is that an answer is still true, or that it was true when it was recorded: the
+  digest covers the question, exactly as a tool call's does, so a recorded
+  response edited under an unchanged request is a consistent log of a corpus
+  that said something else, and `recheck` is what executes the call and finds
+  out.
+- **An override replaces a read's answer and never its question.** A recorded
+  request, and a `ctx.read`'s source and question, are facts about the call the
+  tool made — and the slot the answer is served from is a digest of them, so a
+  substitution free to move one would leave the log holding an answer to a call
+  nobody made. They survive it, and the response substituted for a fetch keeps
+  the recorded status, status text and headers unless the value you pass names
+  them. It also wants a fork point *inside* the step: these are reads a tool
+  made, so a fork at the step above replays the call along with its reads and the
+  value you supplied is served to nobody.
 - **`diff` checks two logs against each other, one hop at a time.** Two runs
   that both replayed a stretch of the same log cannot hold different values
   across it, and that is checkable from the two logs alone — which is what makes
@@ -1695,8 +1785,8 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 ## Status
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
-one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads — what it asked, body and all, and what came back — inside the boundary, the `ctx.read` that does the same for the database queries, subprocesses and native clients no wrapper can intercept, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log and the `conclusion` check that holds a run's reported answer and ending to the response its log ends on, the `diff` comparison that holds two logs to the prefix they claim from the same source and says whether the two runs were asking the same thing where they parted, and the `recheck` re-execution including its `unstable` finding, the watch on the
-ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, the `tree` view that draws a store as the family of runs it actually is, and the `search` walk that forks downward until a change takes and reports the cheapest fork point it did — is covered by 452 tests that run without network access — including a seeded property check that generates dozens of run shapes and holds each of them to the two guarantees the runtime rests on: a replay reproduces the log effect for effect and executes nothing, and a pure-tools fork at every step reproduces its parent. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads — what it asked, body and all, and what came back — inside the boundary, the `ctx.read` that does the same for the database queries, subprocesses and native clients no wrapper can intercept, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log, the `reads` check that holds every journaled read to the call that made it and to the question its own slot is a digest of, and the `conclusion` check that holds a run's reported answer and ending to the response its log ends on, the `diff` comparison that holds two logs to the prefix they claim from the same source and says whether the two runs were asking the same thing where they parted, and the `recheck` re-execution including its `unstable` finding, the watch on the
+ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, the `tree` view that draws a store as the family of runs it actually is, and the `search` walk that forks downward until a change takes and reports the cheapest fork point it did — is covered by 462 tests that run without network access — including a seeded property check that generates dozens of run shapes and holds each of them to the two guarantees the runtime rests on: a replay reproduces the log effect for effect and executes nothing, and a pure-tools fork at every step reproduces its parent. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -1704,7 +1794,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 450 tests, no network, no API key
+npm test           # 462 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

@@ -1,5 +1,6 @@
 import { realNow, type AmbientSource } from "./ambient.ts";
 import { DivergenceError, ReplayedFailure } from "./errors.ts";
+import type { RecordedFetch } from "./http.ts";
 import type { RecordedRead } from "./read.ts";
 import type { RecordedFailure } from "./types.ts";
 
@@ -433,6 +434,27 @@ function substitute(effect: RecordedEffect, value: unknown): unknown {
   if (effect.kind === "read") {
     const { source, question } = (effect.value ?? {}) as RecordedRead;
     return { source, question, value };
+  }
+  // A fetch makes the same bargain, with the request in the place of the source
+  // and the question: it is what the tool asked, and the slot the answer is
+  // served from is a digest of it, so a substitution free to move it would leave
+  // the log holding an answer to a call nobody made — and a line every reader of
+  // it renders as a response to nothing.
+  //
+  // Bare text is the body with the rest of the recorded response kept, since
+  // "what if the corpus had said something else" should not also cost you its
+  // status and its content type. An object names the fields it replaces, so
+  // `{"status":503,"body":""}` is a host that was down. A recorded rejection has
+  // no response to keep, so text put in its place is a plain 200.
+  if (effect.kind === "fetch") {
+    const { request, status, statusText, headers, error } = (effect.value ?? {}) as RecordedFetch;
+    const kept: RecordedFetch =
+      error === undefined
+        ? { request, status, statusText, headers, body: "" }
+        : { request, status: 200, statusText: "OK", headers: {}, body: "" };
+    return typeof value === "object" && value !== null
+      ? { ...kept, ...value, request }
+      : { ...kept, body: typeof value === "string" ? value : JSON.stringify(value) };
   }
   if (effect.kind !== "tool") return value;
   if (typeof value === "object" && value !== null && "content" in value) return value;

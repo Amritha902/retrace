@@ -248,6 +248,30 @@ publish contains rather than what changed since something.
   it was made. A log written before runs recorded their tool declarations, or
   before the digests existed at all, comes back skipped rather than reported as
   edited.
+- **`verify`'s `reads` check.** The same question put to the half of a log
+  `requests` cannot reach. A `ctx.fetch` and a `ctx.read` are asked for by
+  neither the model nor a response, so the walk that rebuilds a conversation
+  never arrives at one, and in a run whose tools read the world most of the
+  effects were held to nothing at all. They need no rebuilding: the slot a read
+  is served from is a digest of what it asked, and what it asked is recorded
+  beside the answer, so the key is built back out of the value and compared. A
+  recorded request or a read's question edited under its answer fails here and
+  nowhere else — and it is the value a fork is served *past* its fork point,
+  since the key table outlives the cut, so a doctored response is a doctored
+  world for the live tail of every run below it. Every journaled read, the clock
+  and ids included, is also held to the tool call that made it, that call's step
+  and the slot that call handed out, so an orphan or a missing read is named
+  rather than counted. A log whose tools read nothing passes rather than
+  skipping: there is nothing in it that could disagree with a slot.
+- **An override replaces a read's answer, not the call it answered.** A
+  substitution on a `ctx.fetch` used to replace the whole recorded value,
+  request included — which left the log holding a response to nothing, crashed
+  `show` and `report` on the line that renders it, and severed the value from
+  the slot that names it. The request now survives, as a `ctx.read`'s source and
+  question already did, and the response keeps its recorded status, status text
+  and headers unless the value passed names them: bare text is the body, and an
+  object names the fields it replaces, so `{"status":503,"body":""}` is a corpus
+  that was down.
 - **`verify`'s `conclusion` check.** The last line of a log — what the run
   answered and how it ended — held to the rest of it. Every other check walks
   the effects and stops there, so rewriting `run.finished` used to leave a log

@@ -20,7 +20,9 @@ import {
   verifyEvents,
   verifyRun,
   type Check,
+  type RecordedRead,
   type RetraceEvent,
+  type ToolContext,
   type VerifyReport,
 } from "../src/index.ts";
 
@@ -685,4 +687,137 @@ test("verify without a run id says so instead of guessing", async (t) => {
   const code = await main(["verify", "--dir", tempDir(t)], io);
   assert.equal(code, 1);
   assert.match(io.errors(), /verify needs a run id/);
+});
+
+/**
+ * A tool that takes its answer and its time from `ctx`, so a run has journaled
+ * reads to hold: one of each sort, since a `read` carries a digest of what it
+ * asked and a clock read is an answer to no question and carries only its slot.
+ */
+const consult = tool({
+  name: "consult",
+  description: "Consult the corpus. Call this when you need a fact you don't have.",
+  inputSchema: objectSchema({ term: { type: "string" } }),
+  run: async (input: { term: string }, ctx: ToolContext) =>
+    `${await ctx.read("corpus", input, () => `definition of ${input.term}`)}, at ${await ctx.now()}`,
+});
+
+async function recordReads(store: MemoryStore, runId = "reads") {
+  return run("explain alpha", {
+    agent,
+    provider: new MockProvider([
+      { content: [toolUse("t1", "consult", { term: "alpha" })] },
+      { content: [text("alpha, explained")] },
+    ]),
+    tools: [consult],
+    store,
+    runId,
+  });
+}
+
+/** The reads inside a log's tool calls, which is what the `reads` check walks. */
+function nested(events: readonly RetraceEvent[]): Extract<RetraceEvent, { type: "effect" }>[] {
+  return events.filter(
+    (e): e is Extract<RetraceEvent, { type: "effect" }> =>
+      e.type === "effect" && e.key.includes("/"),
+  );
+}
+
+test("a log's journaled reads are held to the slots their own values name", async () => {
+  const store = new MemoryStore();
+  await recordReads(store);
+
+  const report = verifyRun("reads", store);
+
+  assertPasses(report, ["parent"]);
+  assert.equal(
+    checkNamed(report, "reads").detail,
+    "2 journaled reads sit in the calls that made them; 1 holds the question its own slot is a digest of",
+  );
+});
+
+test("a log whose tools read nothing has nothing to hold, and passes rather than skipping", async () => {
+  const store = new MemoryStore();
+  await recordBaseline(store);
+
+  const check = checkNamed(verifyRun("baseline", store), "reads");
+
+  assert.equal(check.status, "ok", "a log with no reads has none that could disagree with a slot");
+  assert.match(check.detail, /no tool in this log read a clock/);
+});
+
+test("a read whose recorded question was edited answers a slot it is not in", async () => {
+  const store = new MemoryStore();
+  const result = await recordReads(store);
+  const edited = tampered(
+    result.events,
+    (e) => e.type === "effect" && e.kind === "read",
+    (e) => {
+      if (e.type === "effect") (e.value as RecordedRead).question = { term: "beta" };
+    },
+  );
+
+  const report = verifyEvents("reads", edited, store);
+
+  const check = checkNamed(report, "reads");
+  assert.equal(check.status, "failed");
+  assert.match(check.detail, /"corpus" answering \{"term":"beta"\}/);
+  // The point of the check: a read is reached from neither the conversation nor
+  // a response, so every other check in the report passes this edit.
+  assert.equal(checkNamed(report, "requests").status, "ok");
+  assert.equal(checkNamed(report, "shape").status, "ok");
+});
+
+test("a read moved under a call that never made it names the call it claims", async () => {
+  const store = new MemoryStore();
+  const result = await recordReads(store);
+  const edited = tampered(
+    result.events,
+    (e) => e.type === "effect" && e.kind === "read",
+    (e) => {
+      if (e.type === "effect") e.key = e.key.replace("step:0#0:", "step:0#1:");
+    },
+  );
+
+  const check = checkNamed(verifyEvents("reads", edited, store), "reads");
+
+  assert.equal(check.status, "failed");
+  assert.match(check.detail, /is a read inside "step:0#1:consult", and this log records no tool call by that name/);
+});
+
+test("a read claiming a slot its call never handed out says where the sequence was", async () => {
+  const store = new MemoryStore();
+  const result = await recordReads(store);
+  const edited = tampered(
+    result.events,
+    (e) => e.type === "effect" && e.kind === "clock",
+    (e) => {
+      if (e.type === "effect") e.key = e.key.replace("clock:0", "clock:1");
+    },
+  );
+
+  const check = checkNamed(verifyEvents("reads", edited, store), "reads");
+
+  assert.equal(check.status, "failed");
+  assert.match(check.detail, /claims clock slot 1 of "step:0#0:consult", where that call's clock reads are at 0/);
+});
+
+test("the reads of a fork's replayed prefix are held exactly as its parent's are", async () => {
+  const store = new MemoryStore();
+  await recordReads(store);
+
+  const forked = await fork("reads", {
+    provider: new MockProvider([{ content: [text("alpha, tersely")] }]),
+    tools: [consult],
+    atStep: 1,
+    agent: { system: "Be terse." },
+    store,
+    runId: "reads-forked",
+  });
+
+  assert.deepEqual(
+    nested(forked.events).map((e) => e.key),
+    nested(store.read("reads")).map((e) => e.key),
+  );
+  assertPasses(verifyEvents("reads-forked", forked.events, store));
 });

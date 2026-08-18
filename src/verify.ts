@@ -1,7 +1,9 @@
 import { answerText, exhaustedError, orderFacets, refusalError } from "./agent.ts";
 import { budgetLimitReached } from "./errors.ts";
-import { movedFacets } from "./journal.ts";
+import { fetchSlot, type RecordedFetch } from "./http.ts";
+import { movedFacets, nestedKey } from "./journal.ts";
 import { formatUsd } from "./pricing.ts";
+import { readSlot, type RecordedRead } from "./read.ts";
 import { rebuildRequests, recordedMessages, stampOf } from "./rebuild.ts";
 import { effectsOf } from "./replay.ts";
 import { fingerprint, RunStore } from "./store.ts";
@@ -78,6 +80,7 @@ export function verifyEvents(
   const checks = [
     checkShape(events),
     checkRequests(events),
+    checkReads(events),
     checkConclusion(events),
     checkAccounting(events),
     checkFreeReplay(events),
@@ -264,6 +267,138 @@ function checkRequests(events: readonly RetraceEvent[]): Check {
     `${checked} calls answer the request this log rebuilds, digest for digest` +
       (undigested > 0 ? `; ${plural(undigested, "call")} predates the digests` : ""),
   );
+}
+
+/**
+ * Whether the reads inside this log's tool calls are the reads their own keys
+ * name.
+ *
+ * `requests` holds every model and tool call to the question the rest of the log
+ * says it was put, and stops there: a `ctx.fetch` or a `ctx.read` is reached from
+ * neither the conversation nor a response, so in a log whose tools read the world
+ * most of the effects are held to nothing at all. They need no conversation
+ * rebuilt to check, because each one already carries both halves — the slot a
+ * read is served from is a digest of what it asked, and what it asked is recorded
+ * beside the answer. Build the key back out of the value and the two either
+ * agree or somebody has been at the log.
+ *
+ * This is the half of a log a fork is served *past* its fork point. The keyed
+ * table outlives the cut on purpose, so a doctored response is a doctored world
+ * for the live tail of every run below it — and on the run at the top of a
+ * lineage it is an edit `parent` has nothing to compare against.
+ */
+function checkReads(events: readonly RetraceEvent[]): Check {
+  const name = "reads";
+  const effects = effectsOf(events);
+  const owners = new Map(effects.filter((e) => e.kind === "tool").map((e) => [e.key, e]));
+  // Ordinals are handed out per kind within a call, so a gap in one is a read
+  // that was recorded and is no longer here.
+  const ordinals = new Map<string, number>();
+  let total = 0;
+  let digested = 0;
+
+  for (const effect of effects) {
+    const slash = effect.key.indexOf("/");
+    if (slash === -1) continue;
+    total++;
+
+    const ownerKey = effect.key.slice(0, slash);
+    const owner = owners.get(ownerKey);
+    if (owner === undefined) {
+      return failed(name, `${effect.key} is a read inside "${ownerKey}", and this log records no tool call by that name`);
+    }
+    if (owner.step !== effect.step) {
+      return failed(
+        name,
+        `${effect.key} is recorded at step ${effect.step}, and the call it was read inside ran at step ${owner.step}`,
+      );
+    }
+    // The call claims its slot before its body runs, so a read inside it always
+    // lands after it. The other way round is two events swapped.
+    if (owner.index > effect.index) {
+      return failed(
+        name,
+        `${effect.key} is effect ${effect.index}, ahead of the call it was read inside at ${owner.index}`,
+      );
+    }
+
+    const within = effect.key.slice(slash + 1);
+    if (!within.startsWith(`${effect.kind}:`)) {
+      return failed(name, `${effect.key} is recorded as a ${effect.kind} read, and its own slot says it is not`);
+    }
+    const ordinal = Number(within.slice(effect.kind.length + 1).split(":")[0]);
+    const counted = `${ownerKey}/${effect.kind}`;
+    const expected = ordinals.get(counted) ?? 0;
+    if (ordinal !== expected) {
+      return failed(
+        name,
+        `${effect.key} claims ${effect.kind} slot ${ordinal} of "${ownerKey}", where that call's ${effect.kind} reads are at ${expected}`,
+      );
+    }
+    ordinals.set(counted, expected + 1);
+
+    // Only the reads of the world carry a digest of what they asked. A clock,
+    // an id and a random draw are answers to no question, so their slot is the
+    // ordinal and there is nothing further in them to hold.
+    if (effect.kind !== "fetch" && effect.kind !== "read") continue;
+
+    const asked = askedOf(effect);
+    if (asked === undefined) {
+      return failed(
+        name,
+        effect.kind === "fetch"
+          ? `${effect.key} records no request, so nothing in it says what the response it holds is a response to`
+          : `${effect.key} records no source, so nothing in it says what the answer it holds is an answer from`,
+      );
+    }
+    if (nestedKey(ownerKey, effect.kind, ordinal) + asked.slot !== effect.key) {
+      return failed(name, `${effect.key} holds ${asked.what}, which is not what its own slot is a digest of`);
+    }
+    digested++;
+  }
+
+  // A pass rather than a gap: a log with no journaled reads has none that could
+  // disagree with their slots, exactly as a log with no tool calls has nothing
+  // that could have read a clock behind `ambient`'s back.
+  if (total === 0) {
+    return ok(name, "no tool in this log read a clock, an id, an RNG, the network or a source through ctx");
+  }
+  const where =
+    total === 1
+      ? "1 journaled read sits in the call that made it"
+      : `${total} journaled reads sit in the calls that made them`;
+  const held =
+    digested === 0
+      ? ""
+      : digested === 1
+        ? "; 1 holds the question its own slot is a digest of"
+        : `; ${digested} hold the question their own slot is a digest of`;
+  return ok(name, where + held);
+}
+
+/**
+ * The slot a read's own recorded value says it should be in, and how to say what
+ * it holds when that is not the slot it is in.
+ *
+ * Taken from the same functions the loop keys these with, for the reason
+ * `stampOf` takes a request's digest the way the loop took it: a second
+ * implementation is a second thing to drift.
+ */
+function askedOf(effect: Effect): { slot: string; what: string } | undefined {
+  if (effect.kind === "fetch") {
+    const { request } = (effect.value ?? {}) as RecordedFetch;
+    if (request === undefined) return undefined;
+    return {
+      slot: `:${fetchSlot(request)}`,
+      what: `a response to ${request.method} ${request.url}`,
+    };
+  }
+  const { source, question } = (effect.value ?? {}) as RecordedRead;
+  if (source === undefined) return undefined;
+  return {
+    slot: `:${source}:${readSlot(source, question)}`,
+    what: `${quote(source)} answering ${JSON.stringify(question) ?? "nothing"}`,
+  };
 }
 
 /**

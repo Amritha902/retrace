@@ -784,3 +784,99 @@ test("a fetch is not a fork point: it resolves by key, wherever the run reaches 
     /fork point is a model or tool call/,
   );
 });
+
+test("an override replaces the response and leaves the request it was an answer to", async () => {
+  const { store } = await record();
+  const key = fetches(store.read("read"))[0]?.key;
+  assert.ok(key);
+
+  // At the call rather than at the step: the tool that reads the corpus has to
+  // execute for the substitution to reach anything, and forking at the step
+  // above it would replay the call along with its fetch.
+  const forked = await fork("read", {
+    provider: new MockProvider(script()),
+    tools: [lookupTool()],
+    atEffect: "step:0#0:search",
+    overrides: { [key]: JSON.stringify({ hits: "nothing at all" }) },
+    store,
+    runId: "what-if",
+  });
+
+  const [substituted] = fetches(forked.events);
+  assert.ok(substituted);
+  assert.equal(substituted.overridden, true);
+  const value = substituted.value as RecordedFetch;
+  // The request is what the tool asked and what the slot is a digest of, so the
+  // substitution leaves it alone — and the status and the content type with it,
+  // since what was asked was "say something else", not "be a different corpus".
+  assert.deepEqual(value.request, { method: "GET", url: "https://corpus.test/search?q=alpha" });
+  assert.equal(value.status, 200);
+  assert.equal(value.headers["content-type"], "application/json");
+  assert.deepEqual(JSON.parse(value.body), { hits: "nothing at all" });
+
+  const result = effectsOf(forked.events).find((e) => e.kind === "tool");
+  assert.equal(result?.replayed, false, "the call at the fork point ran for real");
+  assert.equal((result?.value as { content: string }).content, "200 nothing at all");
+  assert.equal(verifyEvents("what-if", forked.events, store).ok, true);
+});
+
+test("an override that names the response's fields is a corpus that answered differently", async () => {
+  const { store } = await record();
+  const key = fetches(store.read("read"))[0]?.key;
+  assert.ok(key);
+
+  const forked = await fork("read", {
+    provider: new MockProvider(script()),
+    tools: [lookupTool()],
+    atEffect: "step:0#0:search",
+    overrides: { [key]: { status: 503, body: JSON.stringify({ hits: "gone" }) } },
+    store,
+    runId: "what-if-down",
+  });
+
+  const value = fetches(forked.events)[0]?.value as RecordedFetch;
+  assert.equal(value.status, 503);
+  assert.deepEqual(value.request, { method: "GET", url: "https://corpus.test/search?q=alpha" });
+  const result = effectsOf(forked.events).find((e) => e.kind === "tool");
+  assert.equal((result?.value as { content: string }).content, "503 gone");
+});
+
+test("a substituted response still renders, in show and in the report", async () => {
+  const { store } = await record();
+  const key = fetches(store.read("read"))[0]?.key;
+  assert.ok(key);
+
+  const forked = await fork("read", {
+    provider: new MockProvider(script()),
+    tools: [lookupTool()],
+    atEffect: "step:0#0:search",
+    overrides: { [key]: JSON.stringify({ hits: "nothing at all" }) },
+    store,
+    runId: "what-if-shown",
+  });
+
+  const line = describeFetch(fetches(forked.events)[0]?.value as RecordedFetch);
+  assert.match(line, /^GET https:\/\/corpus\.test\/search\?q=alpha → 200/);
+  assert.match(renderReport(summarize("what-if-shown", forked.events), forked.events), /q=alpha/);
+});
+
+test("a recorded request edited under its answer fails the reads check", async () => {
+  const { store, result } = await record();
+
+  const edited = structuredClone(result.events) as RetraceEvent[];
+  const target = edited.find((e) => e.type === "effect" && e.kind === "fetch");
+  assert.ok(target?.type === "effect");
+  (target.value as RecordedFetch).request.url = "https://corpus.test/search?q=gamma";
+
+  const report = verifyEvents("read", edited, store);
+  const reads = report.checks.find((c) => c.name === "reads");
+  assert.equal(reads?.status, "failed");
+  assert.match(
+    reads?.detail ?? "",
+    /holds a response to GET https:\/\/corpus\.test\/search\?q=gamma, which is not what its own slot is a digest of/,
+  );
+  // Nothing else in the log reaches a fetch, which is the whole reason the
+  // check exists: every other check passes this edit.
+  assert.equal(report.checks.find((c) => c.name === "requests")?.status, "ok");
+  assert.equal(report.checks.find((c) => c.name === "shape")?.status, "ok");
+});
