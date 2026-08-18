@@ -52,6 +52,14 @@ publish contains rather than what changed since something.
   and `maxForks` bound it; a fork that did not complete is never a match; and a
   search carrying overrides stops at the step below which the substituted value
   would no longer be served, rather than walking into `fork`'s refusal.
+  `repeat` cuts each fork point more than once, because one fork is one draw and
+  a model that would have moved the answer on its own is otherwise
+  indistinguishable from a change taking: a fork point holds only if every fork
+  made at it satisfies the predicate, one that answered both ways is reported
+  `unstable` and is not a finding, and the forks of each fork point are held to
+  the prefix they all replayed, so the model is the only thing a difference
+  between them can be about. `maxForks` counts forks rather than fork points, so
+  a cap that cannot afford a whole fork point does not try half of one.
 - **`sweepForkPoint`.** The other half of the same question: fix the fork point
   and vary the change. It forks a run once per arm — an arm being an agent to
   change, a value to substitute, or an input to replace — so five prompts tried
@@ -436,7 +444,7 @@ depend on.
 
 ### Verified by
 
-476 tests that run with no network and no API key, plus two `[live]` integration
+488 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:

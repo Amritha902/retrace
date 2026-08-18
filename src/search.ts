@@ -1,18 +1,54 @@
+import { holdSharedPrefix, type SharedLog, type SharedPrefix } from "./compare.ts";
 import { DETERMINISTIC_KINDS, type Overrides, type RecordedEffect } from "./journal.ts";
 import { effectsOf, fork, summarize, type ReenterOptions } from "./replay.ts";
 import { newRunId, RunStore } from "./store.ts";
 import type { AgentSpec, RunResult, RunStatus } from "./types.ts";
 
 /** One fork, made and looked at. */
-export interface SearchTrial {
-  /** The fork point this trial cut at: steps below it replayed, this one ran live. */
-  atStep: number;
+export interface SearchRun {
   runId: string;
   status: RunStatus;
   output: string;
   error?: string;
   /** Whether this fork's answer is the one the search was looking for. */
   matched: boolean;
+  costUsd: number;
+  billedUsd: number;
+  savedUsd: number;
+}
+
+/**
+ * One fork point, and what it answered when the search cut there.
+ *
+ * With `repeat` above one it is cut more than once, and the fork point holds
+ * only if every fork made at it answered the same way — see `matched`.
+ */
+export interface SearchTrial {
+  /** The fork point this trial cut at: steps below it replayed, this one ran live. */
+  atStep: number;
+  /** The forks made here, in the order they were made. Never empty. */
+  runs: SearchRun[];
+  /** The first of them, which the fields below describe. */
+  runId: string;
+  status: RunStatus;
+  output: string;
+  error?: string;
+  /**
+   * Whether *every* fork made here answered what the search was looking for.
+   * A fork that did not complete is not one that did, so it holds the trial
+   * open too — `runs` is where a person reads which of the two happened.
+   */
+  matched: boolean;
+  /** How many of them did. */
+  matches: number;
+  /** Some did and some didn't: this fork point does not answer the same twice. */
+  unstable: boolean;
+  /**
+   * The forks made here held to the prefix they all replayed — the claim that
+   * makes repeating a fork point a measurement rather than two runs. Absent
+   * with a single fork, where there is nothing to hold against anything.
+   */
+  controlled?: SharedPrefix;
   costUsd: number;
   billedUsd: number;
   savedUsd: number;
@@ -33,10 +69,18 @@ export interface SearchReport {
   /** The highest and lowest fork points this search was allowed to try. */
   from: number;
   downTo: number;
-  /** The forks it made, highest fork point first — the order it walks them. */
+  /** How many times each fork point was cut. One unless the caller asked for more. */
+  repeat: number;
+  /** The fork points it tried, highest first — the order it walks them. */
   tried: SearchTrial[];
-  /** The highest fork point whose answer satisfied the predicate, if any did. */
+  /** The highest fork point every fork made at it satisfied the predicate, if any did. */
   found?: SearchTrial;
+  /**
+   * The highest fork point the change took at some of the time and not all of
+   * it. Only reachable with `repeat` above one, and the reason to ask for it: a
+   * fork point that answers two ways is not one a single fork could locate.
+   */
+  unstable?: SearchTrial;
   /** Why it stopped above `downTo`, when it did. */
   stopped?: string;
   /** What the trials cost at list price, what they were billed, and the gap. */
@@ -52,6 +96,18 @@ export interface SearchOptions extends Omit<ReenterOptions, "runId"> {
   downTo?: number;
   /** Give up after this many forks, whatever `downTo` says. */
   maxForks?: number;
+  /**
+   * How many times to cut each fork point. One by default, which is one draw of
+   * whatever the model does at that step.
+   *
+   * Above one, a fork point holds only if every fork made at it answers what
+   * the search is looking for — so a model that would have moved the answer on
+   * its own is reported as a fork point that did not settle, rather than as the
+   * place a change took. The repeats are identical forks, and cost a live tail
+   * each; the prefix below the cut is free for all of them, which is what makes
+   * asking twice affordable at all.
+   */
+  repeat?: number;
   /**
    * What the search is looking for, given the whole of a fork's result.
    * Defaults to an answer that is not the recorded one.
@@ -98,38 +154,68 @@ export async function searchForkPoints(
   const floor = overrideFloor(recorded, options.overrides ?? {});
   const downTo = Math.max(options.downTo ?? 0, floor.step);
   const matches = options.until ?? ((result) => result.output !== parent.output);
+  const repeat = repeatCount(options.repeat);
 
   const tried: SearchTrial[] = [];
   let found: SearchTrial | undefined;
+  let unstable: SearchTrial | undefined;
+  let forks = 0;
   let capped: string | undefined;
 
   for (let atStep = from; atStep >= downTo; atStep--) {
-    if (options.maxForks !== undefined && tried.length >= options.maxForks) {
+    // A fork point costs `repeat` forks, and half a fork point answers nothing —
+    // so the cap is checked against what trying this one would take rather than
+    // against what has been spent.
+    if (options.maxForks !== undefined && forks + repeat > options.maxForks) {
       capped =
         `capped at ${options.maxForks} fork${options.maxForks === 1 ? "" : "s"}: step ` +
         `${atStep}${atStep === downTo ? "" : ` down to ${downTo}`} was not tried`;
       break;
     }
 
-    const result = await fork(parentRunId, {
-      ...options,
-      atStep,
-      store,
-      runId: newRunId("search"),
-    });
+    const runs: SearchRun[] = [];
+    const logs: SharedLog[] = [];
+    for (let i = 0; i < repeat; i++) {
+      const result = await fork(parentRunId, {
+        ...options,
+        atStep,
+        store,
+        runId: newRunId("search"),
+      });
+      forks++;
+      logs.push({ runId: result.runId, events: result.events });
+      runs.push({
+        runId: result.runId,
+        status: result.status,
+        output: result.output,
+        ...(result.error === undefined ? {} : { error: result.error }),
+        matched: result.status === "completed" && matches(result),
+        costUsd: result.totals.costUsd,
+        billedUsd: result.totals.billedUsd,
+        savedUsd: result.totals.savedUsd,
+      });
+    }
+
+    const first = runs[0]!;
+    const hits = runs.filter((r) => r.matched).length;
     const trial: SearchTrial = {
       atStep,
-      runId: result.runId,
-      status: result.status,
-      output: result.output,
-      ...(result.error === undefined ? {} : { error: result.error }),
-      matched: result.status === "completed" && matches(result),
-      costUsd: result.totals.costUsd,
-      billedUsd: result.totals.billedUsd,
-      savedUsd: result.totals.savedUsd,
+      runs,
+      runId: first.runId,
+      status: first.status,
+      output: first.output,
+      ...(first.error === undefined ? {} : { error: first.error }),
+      matched: hits === runs.length,
+      matches: hits,
+      unstable: hits > 0 && hits < runs.length,
+      ...(repeat > 1 ? { controlled: holdSharedPrefix(logs) } : {}),
+      costUsd: runs.reduce((sum, r) => sum + r.costUsd, 0),
+      billedUsd: runs.reduce((sum, r) => sum + r.billedUsd, 0),
+      savedUsd: runs.reduce((sum, r) => sum + r.savedUsd, 0),
     };
     tried.push(trial);
     options.onTrial?.(trial);
+    if (trial.unstable) unstable ??= trial;
     if (trial.matched) {
       found = trial;
       break;
@@ -151,13 +237,32 @@ export async function searchForkPoints(
     recorded: parent.output,
     from,
     downTo,
+    repeat,
     tried,
     ...(found === undefined ? {} : { found }),
+    ...(unstable === undefined ? {} : { unstable }),
     ...(stopped === undefined ? {} : { stopped }),
     costUsd: total((t) => t.costUsd),
     billedUsd: total((t) => t.billedUsd),
     savedUsd: total((t) => t.savedUsd),
   };
+}
+
+/**
+ * How many times to cut each fork point.
+ *
+ * Zero forks at a fork point is a search that reports on nothing, so it is
+ * refused rather than quietly taken as one — the caller asking for it means
+ * something, and what they mean is not "the default".
+ */
+function repeatCount(repeat: number | undefined): number {
+  if (repeat === undefined) return 1;
+  if (!Number.isInteger(repeat) || repeat < 1) {
+    throw new Error(
+      `repeat has to be a whole number of forks per fork point, at least 1 — got ${repeat}`,
+    );
+  }
+  return repeat;
 }
 
 /**

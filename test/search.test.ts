@@ -20,8 +20,14 @@ import {
   type Tool,
 } from "../src/index.ts";
 import { provider, tools as todaysTools } from "./fixtures/search-module.ts";
+import {
+  provider as wobbling,
+  resetWobble,
+  tools as recordedTools,
+} from "./fixtures/wobble-module.ts";
 
 const MODULE = fileURLToPath(new URL("./fixtures/search-module.ts", import.meta.url));
+const WOBBLE = fileURLToPath(new URL("./fixtures/wobble-module.ts", import.meta.url));
 
 const agent = defineAgent({
   name: "researcher",
@@ -340,7 +346,7 @@ test("a search that finds nothing exits non-zero and says how far it looked", as
   );
 
   assert.equal(code, 1);
-  assert.match(io.text(), /not found: 1 fork down to step 2/);
+  assert.match(io.text(), /not found: 1 fork point down to step 2/);
 });
 
 test("a capped search says what it left untried", async (t) => {
@@ -380,4 +386,250 @@ test("search takes --at as a step to start from, not as an effect key", async (t
 
   assert.equal(code, 1);
   assert.match(io.text(), /--at \(search starts at a step\) takes a whole number/);
+});
+
+test("a fork point cut once is one draw, and the report says as much", async () => {
+  const store = new MemoryStore();
+  await record(store);
+
+  const report = await searchForkPoints("baseline", { provider, tools: todaysTools, store });
+
+  assert.equal(report.repeat, 1);
+  for (const trial of report.tried) {
+    assert.equal(trial.runs.length, 1);
+    assert.equal(trial.unstable, false);
+    assert.equal(
+      trial.controlled,
+      undefined,
+      "one fork has nothing to be held against, so nothing is claimed",
+    );
+    assert.equal(trial.matches, trial.matched ? 1 : 0);
+  }
+});
+
+test("a fork point cut several times holds only if every fork of it answers the same way", async () => {
+  const store = new MemoryStore();
+  await record(store);
+
+  const report = await searchForkPoints("baseline", {
+    provider,
+    tools: todaysTools,
+    store,
+    repeat: 3,
+  });
+
+  assert.equal(report.repeat, 3);
+  assert.equal(report.found?.atStep, 1, "the same fork point one fork found, now asked three times");
+  assert.equal(report.found?.matched, true);
+  assert.equal(report.found?.matches, 3);
+  assert.equal(report.found?.runs.length, 3);
+  assert.deepEqual(
+    report.found?.runs.map((r) => r.output),
+    Array(3).fill("definition of alpha | today's definition of beta"),
+    "a corpus that moved moves the answer every time, which is what makes this a finding",
+  );
+  assert.equal(report.unstable, undefined);
+  assert.equal(report.tried[0]?.matches, 0, "and step 2 held nobody's attention three times over");
+});
+
+test("the forks of one fork point are held to the prefix they all replayed", async () => {
+  const store = new MemoryStore();
+  await record(store);
+
+  const report = await searchForkPoints("baseline", {
+    provider,
+    tools: todaysTools,
+    store,
+    repeat: 3,
+  });
+
+  const held = report.found?.controlled;
+  assert.equal(held?.runs, 3);
+  assert.equal(held?.claimed, 2, "step 0's model call and its lookup, below the fork point");
+  assert.equal(held?.excused, 0);
+  assert.equal(held?.ok, true);
+  assert.equal(held?.contradiction, undefined);
+});
+
+test("every fork of a repeated fork point is a real run in the store", async () => {
+  const store = new MemoryStore();
+  await record(store);
+
+  const report = await searchForkPoints("baseline", {
+    provider,
+    tools: todaysTools,
+    store,
+    repeat: 3,
+  });
+
+  const ids = new Set<string>();
+  for (const trial of report.tried) {
+    for (const one of trial.runs) {
+      assert.equal(ids.has(one.runId), false, "each fork gets a run id of its own");
+      ids.add(one.runId);
+      const summary = summarize(one.runId, store.read(one.runId));
+      assert.equal(summary.forkedFrom?.runId, "baseline");
+      assert.equal(summary.forkedFrom?.atStep, trial.atStep);
+      assert.equal(summary.output, one.output);
+    }
+  }
+  assert.equal(ids.size, report.tried.length * 3);
+});
+
+test("a fork point's cost is what all its forks cost, and the prefix is free for each", async () => {
+  const store = new MemoryStore();
+  await record(store);
+
+  const report = await searchForkPoints("baseline", {
+    provider,
+    tools: todaysTools,
+    store,
+    repeat: 3,
+  });
+
+  const found = report.found!;
+  assert.equal(
+    Number(found.billedUsd.toFixed(6)),
+    Number(found.runs.reduce((sum, r) => sum + r.billedUsd, 0).toFixed(6)),
+  );
+  assert.ok(found.savedUsd > 0, "three forks of one point replayed three prefixes for nothing");
+  assert.equal(
+    Number((report.billedUsd + report.savedUsd).toFixed(6)),
+    Number(report.costUsd.toFixed(6)),
+  );
+});
+
+test("a model that answers two ways is a fork point that settles on neither", async () => {
+  const store = new MemoryStore();
+  await record(store);
+  resetWobble();
+
+  const report = await searchForkPoints("baseline", {
+    provider: wobbling,
+    tools: recordedTools,
+    store,
+    repeat: 2,
+  });
+
+  assert.equal(report.found, undefined, "nothing held, so there is no fork point to report");
+  assert.equal(report.unstable?.atStep, 2, "the highest one that took some of the time");
+  assert.equal(report.unstable?.matches, 1);
+  assert.equal(report.unstable?.runs.length, 2);
+  assert.equal(report.unstable?.matched, false);
+  assert.deepEqual(
+    report.tried.map((t) => t.atStep),
+    [2, 1, 0],
+    "an unstable fork point is not an answer, so the walk carries on below it",
+  );
+  assert.deepEqual(
+    report.unstable?.runs.map((r) => r.matched),
+    [false, true],
+    "one fork answered what the run recorded and the next did not, with nothing changed",
+  );
+});
+
+test("the forks of an unstable fork point still shared everything below it", async () => {
+  const store = new MemoryStore();
+  await record(store);
+  resetWobble();
+
+  const report = await searchForkPoints("baseline", {
+    provider: wobbling,
+    tools: recordedTools,
+    store,
+    repeat: 2,
+  });
+
+  // The whole claim of an unstable reading: the two forks cannot have differed
+  // below the cut, so what moved, moved in the live tail.
+  const held = report.unstable?.controlled;
+  assert.equal(held?.ok, true);
+  assert.equal(held?.runs, 2);
+  assert.equal(held?.claimed, 4, "two steps of model call and lookup, below step 2");
+});
+
+test("a fork point has to be cut at least once", async () => {
+  const store = new MemoryStore();
+  await record(store);
+
+  for (const repeat of [0, -1, 1.5]) {
+    await assert.rejects(
+      () => searchForkPoints("baseline", { provider, tools: todaysTools, store, repeat }),
+      /repeat has to be a whole number of forks per fork point, at least 1/,
+      `repeat ${repeat} is not a number of forks`,
+    );
+  }
+});
+
+test("the cap counts forks, not fork points, and never tries half of one", async () => {
+  const store = new MemoryStore();
+  await record(store);
+
+  const report = await searchForkPoints("baseline", {
+    provider,
+    tools: todaysTools,
+    store,
+    repeat: 2,
+    maxForks: 3,
+  });
+
+  assert.deepEqual(
+    report.tried.map((t) => t.runs.length),
+    [2],
+    "a second fork point would take two more forks and only three were allowed",
+  );
+  assert.match(report.stopped ?? "", /capped at 3 forks: step 1 down to 0 was not tried/);
+});
+
+test("a search told to ask twice says what it asked and what held", async (t) => {
+  const dir = tempDir(t);
+  await record(new RunStore(dir));
+  const io = capture();
+
+  const code = await main(
+    ["search", "baseline", "--dir", dir, "--module", MODULE, "--repeat", "3"],
+    io,
+  );
+
+  assert.equal(code, 0);
+  const text = io.text();
+  assert.match(text, /3 times over at each/);
+  assert.match(text, /step 2\s+same\s+0 of 3/);
+  assert.match(text, /step 1\s+differs\s+3 of 3/);
+  assert.match(text, /found at step 1/);
+  assert.match(text, /controlled: 6 effects replayed identically by the 3 forks of each fork point/);
+  assert.match(text, /6 forks/, "two fork points, three forks each");
+});
+
+test("a search that finds only an unstable fork point says so and exits non-zero", async (t) => {
+  const dir = tempDir(t);
+  await record(new RunStore(dir));
+  resetWobble();
+  const io = capture();
+
+  const code = await main(
+    ["search", "baseline", "--dir", dir, "--module", WOBBLE, "--repeat", "2"],
+    io,
+  );
+
+  assert.equal(code, 1);
+  const text = io.text();
+  assert.match(text, /step 2\s+unstable 1 of 2/);
+  assert.match(text, /unstable at step 2/);
+  assert.match(text, /not the same twice, so it is not somewhere a change can be located/);
+  assert.match(text, /not found: 3 fork points down to step 0/);
+});
+
+test("--repeat has to be a number of forks", async (t) => {
+  const dir = tempDir(t);
+  await record(new RunStore(dir));
+  const io = capture();
+
+  const code = await main(
+    ["search", "baseline", "--dir", dir, "--module", MODULE, "--repeat", "0"],
+    io,
+  );
+
+  assert.equal(code, 1);
+  assert.match(io.text(), /repeat has to be a whole number of forks per fork point, at least 1/);
 });

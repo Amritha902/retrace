@@ -597,6 +597,64 @@ the refusal.
 
 In code it is `searchForkPoints(runId, { provider, tools, until })`.
 
+### One fork is one draw
+
+Everything above cuts each fork point once, and once is a single sample of
+whatever the model does at that step. A model with a temperature answers
+differently for reasons that have nothing to do with your change — so a search
+reading that as *the change taking here* has located a threshold that isn't
+there. `--repeat` cuts each fork point more than once and holds it to all of
+them:
+
+```
+$ retrace search demo-original --module ./agent-module.ts --repeat 3
+...
+  step 3   same     0 of 3  $0.2300 billed · $0.6900 free
+           The market is large, contested, and priced per seat.
+  step 2   differs  3 of 3  $0.4600 billed · $0.4600 free
+           Large market. Crowded. Per-seat pricing.
+
+found at step 2 search_20260818T1204_9a1c
+  the highest fork point this change takes at — above it the run answered the same
+controlled: 6 effects replayed identically by the 3 forks of each fork point
+  6 forks · $1.3800 billed · $2.3000 not spent again out of $3.6800
+```
+
+A fork point holds only if *every* fork made at it answered what the search is
+looking for. One that answered both ways is the finding this flag exists to
+produce:
+
+```
+  step 3   unstable 1 of 3  $0.2300 billed · $0.6900 free
+...
+unstable at step 3
+  1 of 3 forks made there answered what this search is looking for, and the rest did not —
+  the answer at that fork point is not the same twice, so it is not somewhere a change can be located
+```
+
+The search carries on below it — an unstable fork point is not an answer — and
+if nothing settles it comes up empty and exits non-zero, with the highest
+unstable one named. That is a fact about the run rather than a failure of the
+search, and it is the one a single fork could not have reported: it takes two
+cuts of the same point to watch the answer move with nothing changed between
+them.
+
+`controlled` is what makes that a measurement rather than three runs. The forks
+of one fork point are siblings, so what they replayed below the cut is checkable
+from their own logs — and it is checked, exactly as [a sweep holds its
+arms](#several-changes-at-one-point). They differ above the fork point and
+nowhere else, which leaves the model as the only thing a difference between them
+can be about.
+
+The prefix is free for every one of them, which is the whole reason asking three
+times is affordable: three cuts of step 3 are three live tails, not three runs.
+`--max-forks` counts forks rather than fork points, so a cap that cannot afford
+a whole fork point does not try half of one.
+
+What none of this can tell you is whether the *recorded* answer was stable. That
+run's tools are gone — a log cannot hold a running tool — so the one sample
+nothing here can repeat is the original.
+
 ## Several changes at one point
 
 `search` fixes the change and varies the fork point. The other half of the same
@@ -1031,6 +1089,7 @@ retrace fork … --at <key>     # …or re-enter mid-step, at one recorded call
 retrace fork … --set k=v      # …serving v in place of the effect recorded at k
 retrace plan <run-id> --at N  # what that fork would replay, save and go stale on
 retrace search <run-id>       # …fork downward until the change takes, cheapest first
+retrace search … --repeat N   # …cutting each fork point N times, so one draw is not the answer
 retrace sweep <run-id> --at N # …or try several changes at one point, off one prefix
 retrace resume <run-id>       # carry on a run that stopped early, from its log
 retrace stale <run-id>        # what moved under the steps it replayed, and to what
@@ -1857,6 +1916,19 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   fork that completed. And nothing here assumes the answer moves monotonically
   with depth: the walk tries each fork point in turn and stops at the first that
   holds, which is why it is a descent rather than a bisection.
+- **A fork point is cut once unless you ask for more, and once is one draw.** A
+  model that would have moved the answer on its own is not something a single
+  fork can tell from a change taking, so by default the fork point a search
+  reports is the highest one it *observed* to hold. `repeat` above one cuts each
+  fork point that many times and holds it to all of them: a fork point that
+  answered both ways comes back `unstable` and is not a finding, and the forks
+  of each fork point are held to the prefix they shared, so the model is the only
+  thing a difference between them can be about. Two things it still cannot do.
+  A fork point that read the same every time was sampled, not proved — `repeat`
+  narrows the odds and does not remove them, and a "same" above the one it found
+  is as much a sample as anything else. And the recorded run is the one sample
+  nothing here can take again: its tools are gone, so whether *it* was a fluke
+  is outside what any number of forks can answer.
 - **`sweep` makes the forks too, and its `controlled` line is about the prefix
   rather than the answers.** Every arm executes its own live tail for real, so
   the `irreversible` hazard above arrives once per arm; the arms run in sequence
@@ -1874,7 +1946,7 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
 one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads — what it asked, body and all, and what came back — inside the boundary, the `ctx.read` that does the same for the database queries, subprocesses and native clients no wrapper can intercept, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log, the `reads` check that holds every journaled read to the call that made it and to the question its own slot is a digest of, and the `conclusion` check that holds a run's reported answer and ending to the response its log ends on, the `diff` comparison that holds two logs to the prefix they claim from the same source and says whether the two runs were asking the same thing where they parted, and the `recheck` re-execution including its `unstable` finding, the watch on the
-ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, the `tree` view that draws a store as the family of runs it actually is, the `search` walk that forks downward until a change takes and reports the cheapest fork point it did, and the `sweep` that tries several changes at one fork point off one replayed prefix and holds the arms to the prefix they shared — is covered by 476 tests that run without network access — including a seeded property check that generates dozens of run shapes and holds each of them to the two guarantees the runtime rests on: a replay reproduces the log effect for effect and executes nothing, and a pure-tools fork at every step reproduces its parent. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, the `tree` view that draws a store as the family of runs it actually is, the `search` walk that forks downward until a change takes and reports the cheapest fork point it did, its `--repeat` that cuts each fork point several times so a model that moved the answer on its own comes back `unstable` rather than as a finding, and the `sweep` that tries several changes at one fork point off one replayed prefix and holds the arms to the prefix they shared — is covered by 488 tests that run without network access — including a seeded property check that generates dozens of run shapes and holds each of them to the two guarantees the runtime rests on: a replay reproduces the log effect for effect and executes nothing, and a pure-tools fork at every step reproduces its parent. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -1882,7 +1954,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 476 tests, no network, no API key
+npm test           # 488 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

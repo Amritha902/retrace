@@ -310,6 +310,71 @@ function describe(effect: Effect | undefined): string {
   return effect ? `${effect.kind}:${effect.key}` : "nothing";
 }
 
+/** One run in a set being held to the prefix the set shares. */
+export interface SharedLog {
+  runId: string;
+  events: readonly RetraceEvent[];
+}
+
+/**
+ * Whether a set of runs was a controlled experiment, checked rather than assumed.
+ *
+ * A set of forks off one run at one fork point are siblings, so `compareEvents`
+ * already knows what they owe each other; the only thing left is to say it over
+ * a set rather than a pair. It is what separates several forks from several
+ * runs: they differ above the fork point and share everything underneath.
+ */
+export interface SharedPrefix {
+  /** How many runs were held against each other. Below two there is nothing to check. */
+  runs: number;
+  /** Leading effects every run was obliged to hold identically: the free prefix. */
+  claimed: number;
+  /** Effects inside it a run was told to serve a different value at. */
+  excused: number;
+  /** Set when two of them disagree somewhere they both replayed. */
+  contradiction?: string;
+  ok: boolean;
+}
+
+/**
+ * Hold a set of sibling runs to the prefix they all replayed.
+ *
+ * Comparing each against the first is enough: agreement is transitive, and a
+ * disagreement between any two of them shows up against the first as well.
+ */
+export function holdSharedPrefix(logs: readonly SharedLog[]): SharedPrefix {
+  const first = logs[0];
+  if (first === undefined || logs.length < 2) {
+    return { runs: logs.length, claimed: 0, excused: 0, ok: true };
+  }
+
+  let claimed = Number.POSITIVE_INFINITY;
+  let contradiction: string | undefined;
+  for (const other of logs.slice(1)) {
+    const seen = compareEvents(first.runId, first.events, other.runId, other.events);
+    claimed = Math.min(claimed, seen.claimed);
+    contradiction ??= seen.contradiction;
+  }
+
+  // Counted over the runs rather than per comparison: a value one of them was
+  // told to substitute is one position of the shared prefix that is a
+  // substitution, however many pairs it shows up in.
+  const substituted = new Set<string>();
+  for (const log of logs) {
+    for (const effect of effectsOf(log.events).slice(0, claimed)) {
+      if (effect.overridden === true) substituted.add(effect.key);
+    }
+  }
+
+  return {
+    runs: logs.length,
+    claimed,
+    excused: substituted.size,
+    ...(contradiction === undefined ? {} : { contradiction }),
+    ok: contradiction === undefined,
+  };
+}
+
 /**
  * What an effect came back with, as one comparable string. A throw is an
  * outcome as much as a value is — see `verify`, which compares the same way and

@@ -76,6 +76,11 @@ Options
                             recorded one
   --down-to <n>             the lowest fork point search may try (default 0)
   --max-forks <n>           give up after this many forks, whatever --down-to says
+  --repeat <n>              cut each of search's fork points n times instead of
+                            once (default 1). A fork point holds only if every
+                            fork made at it answers the same way, so a model
+                            that would have moved the answer on its own comes
+                            back "unstable" rather than as a change taking
   -o, --out <path>          where report writes its HTML or export its bundle;
                             "-" for stdout (default: <run-id>.html, and
                             <run-id>.bundle.jsonl)
@@ -142,6 +147,7 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
   const until = takeOption(args, "--until");
   const downTo = readCount(takeOption(args, "--down-to"), "--down-to");
   const maxForks = readCount(takeOption(args, "--max-forks"), "--max-forks");
+  const repeat = readCount(takeOption(args, "--repeat"), "--repeat");
   const allowIrreversible = takeFlag(args, "--allow-irreversible");
   const reentry: Reentry = { overrides, onDivergence, allowIrreversible };
 
@@ -171,6 +177,7 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
         until,
         downTo,
         maxForks,
+        repeat,
       });
     case "sweep":
       return cmdSweep(io, store, rest[0], atRaw, modulePath, reentry);
@@ -940,6 +947,7 @@ async function cmdSearch(
     until: string | undefined;
     downTo: number | undefined;
     maxForks: number | undefined;
+    repeat: number | undefined;
   },
 ): Promise<number> {
   if (!runId) return fail(io, "search needs a run id");
@@ -956,11 +964,13 @@ async function cmdSearch(
   const agent = { ...parent.agent, ...mod.agent };
   const top = Math.min(from ?? parent.steps - 1, parent.steps - 1);
 
+  const repeat = bounds.repeat ?? 1;
   io.out(`${bold(runId)}  ${statusLabel(parent.status)}  ${dim(`· ${plural(parent.steps, "step")}`)}\n`);
   io.out(
     dim(
       `${agent.name} · ${agent.model} · forking from step ${top} down, until the answer ` +
-        `${until === undefined ? "is not the recorded one" : `matches /${until.source}/`}\n\n`,
+        `${until === undefined ? "is not the recorded one" : `matches /${until.source}/`}` +
+        `${repeat > 1 ? `, ${repeat} times over at each` : ""}\n\n`,
     ),
   );
 
@@ -977,15 +987,21 @@ async function cmdSearch(
     ...(from === undefined ? {} : { from }),
     ...(bounds.downTo === undefined ? {} : { downTo: bounds.downTo }),
     ...(bounds.maxForks === undefined ? {} : { maxForks: bounds.maxForks }),
+    ...(bounds.repeat === undefined ? {} : { repeat: bounds.repeat }),
     ...(until === undefined ? {} : { until: (result) => until.test(result.output) }),
     onTrial: (trial) => {
-      const verdict = trial.matched
-        ? green(until === undefined ? "differs" : "matches")
-        : trial.status === "completed"
-          ? dim(until === undefined ? "same" : "no match")
-          : statusLabel(trial.status);
+      const verdict = trial.unstable
+        ? yellow("unstable")
+        : trial.matched
+          ? green(until === undefined ? "differs" : "matches")
+          : trial.status === "completed"
+            ? dim(until === undefined ? "same" : "no match")
+            : statusLabel(trial.status);
+      // A word is enough for a fork point cut once. Cut several times, the count
+      // is the thing worth reading — most of all on the ones that did not settle.
+      const tally = repeat > 1 ? dim(` ${trial.matches} of ${trial.runs.length}`) : "";
       io.out(
-        `  ${`step ${trial.atStep}`.padEnd(8)} ${padLabel(verdict, 8)} ` +
+        `  ${`step ${trial.atStep}`.padEnd(8)} ${padLabel(verdict, 8)}${tally} ` +
           dim(`${formatUsd(trial.billedUsd)} billed · ${formatUsd(trial.savedUsd)} free\n`),
       );
       io.out(`  ${" ".repeat(8)} ${dim(truncate(trial.error ?? trial.output, 62))}\n`);
@@ -1002,10 +1018,15 @@ async function cmdSearch(
 
   io.out("\n");
   if (report.found === undefined) {
+    const wanted =
+      until === undefined ? "moved off the recorded one" : `matched /${until.source}/`;
     io.out(
-      `${yellow("not found")}: ${plural(report.tried.length, "fork")} down to step ` +
-        `${report.downTo}, and the answer never ` +
-        `${until === undefined ? "moved off the recorded one" : `matched /${until.source}/`}\n`,
+      `${yellow("not found")}: ${plural(report.tried.length, "fork point")} down to step ` +
+        `${report.downTo}, and ` +
+        (report.repeat > 1
+          ? `at none of them had the answer ${wanted} every one of the ${report.repeat} times it was cut`
+          : `the answer never ${wanted}`) +
+        `\n`,
     );
     if (report.stopped !== undefined) io.out(`${dim(report.stopped)}\n`);
   } else {
@@ -1018,13 +1039,48 @@ async function cmdSearch(
         ),
     );
   }
+
+  // The fork point that took some of the time is the finding `--repeat` exists
+  // to produce, and it is worth saying whether or not one below it settled: a
+  // change that takes two forks in three is not a change that takes at step N.
+  if (report.unstable !== undefined) {
+    const t = report.unstable;
+    io.out(
+      `${yellow(`unstable at step ${t.atStep}`)}\n` +
+        dim(
+          `  ${t.matches} of ${plural(t.runs.length, "fork")} made there answered what this ` +
+            `search is looking for, and the rest did not —\n  the answer at that fork point is ` +
+            `not the same twice, so it is not somewhere a change can be located\n`,
+        ),
+    );
+  }
+
+  const controlled = report.tried.map((t) => t.controlled).filter((c) => c !== undefined);
+  const contradiction = controlled.find((c) => !c.ok)?.contradiction;
+  if (contradiction !== undefined) {
+    io.out(`${red("not controlled")}: ${contradiction}\n`);
+  } else if (controlled.length > 0) {
+    // Summed over the fork points rather than reduced to their smallest: a fork
+    // at step 0 replays nothing and holds nobody to anything, and averaging that
+    // in with the fork points that did would understate what was checked.
+    const held = controlled.reduce((sum, c) => sum + c.claimed, 0);
+    const substituted = controlled.reduce((sum, c) => sum + c.excused, 0);
+    io.out(
+      dim(
+        `controlled: ${plural(held, "effect")} replayed identically by the ` +
+          `${report.repeat} forks of each fork point` +
+          `${substituted === 0 ? "" : `, ${substituted} of them a value they were told to substitute`}\n`,
+      ),
+    );
+  }
+  const forks = report.tried.reduce((sum, t) => sum + t.runs.length, 0);
   io.out(
     dim(
-      `  ${plural(report.tried.length, "fork")} · ${formatUsd(report.billedUsd)} billed · ` +
+      `  ${plural(forks, "fork")} · ${formatUsd(report.billedUsd)} billed · ` +
         `${formatUsd(report.savedUsd)} not spent again out of ${formatUsd(report.costUsd)}\n`,
     ),
   );
-  return report.found === undefined ? 1 : 0;
+  return report.found === undefined || contradiction !== undefined ? 1 : 0;
 }
 
 /**

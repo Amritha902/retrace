@@ -1,15 +1,8 @@
-import { compareEvents } from "./compare.ts";
+import { holdSharedPrefix, type SharedLog } from "./compare.ts";
 import type { Overrides } from "./journal.ts";
-import {
-  effectsOf,
-  fork,
-  staleFacets,
-  summarize,
-  type ForkPoint,
-  type ReenterOptions,
-} from "./replay.ts";
+import { fork, staleFacets, summarize, type ForkPoint, type ReenterOptions } from "./replay.ts";
 import { newRunId, RunStore } from "./store.ts";
-import type { AgentSpec, RetraceEvent, RunStatus } from "./types.ts";
+import type { AgentSpec, RunStatus } from "./types.ts";
 
 /** One thing to try at the fork point: a change, and a name to read it under. */
 export interface SweepArm {
@@ -121,7 +114,7 @@ export async function sweepForkPoint(
   const names = armNames(options.arms);
 
   const trials: SweepTrial[] = [];
-  const logs: { runId: string; events: readonly RetraceEvent[] }[] = [];
+  const logs: SharedLog[] = [];
 
   for (const [i, arm] of options.arms.entries()) {
     const name = names[i]!;
@@ -206,40 +199,10 @@ function armNames(arms: readonly SweepArm[]): string[] {
  * Hold the arms to the prefix they all replayed.
  *
  * Two arms of a sweep are siblings — both forked from the same run at the same
- * point — so `compareRuns` already knows what they owe each other, and the only
- * thing left is to say it over a set rather than a pair. Comparing each arm
- * against the first is enough: agreement is transitive, and a disagreement
- * between any two of them shows up against the first as well.
+ * point — so this is the general sibling check under the name a sweep reads it
+ * under. `search` holds the repeats of one fork point the same way.
  */
-function controlOf(logs: readonly { runId: string; events: readonly RetraceEvent[] }[]) {
-  const first = logs[0];
-  if (first === undefined || logs.length < 2) {
-    return { arms: logs.length, claimed: 0, excused: 0, ok: true };
-  }
-
-  let claimed = Number.POSITIVE_INFINITY;
-  let contradiction: string | undefined;
-  for (const other of logs.slice(1)) {
-    const seen = compareEvents(first.runId, first.events, other.runId, other.events);
-    claimed = Math.min(claimed, seen.claimed);
-    contradiction ??= seen.contradiction;
-  }
-
-  // Counted over the arms rather than per comparison: a value one arm was told
-  // to substitute is one position of the shared prefix that is a substitution,
-  // however many pairs it shows up in.
-  const substituted = new Set<string>();
-  for (const log of logs) {
-    for (const effect of effectsOf(log.events).slice(0, claimed)) {
-      if (effect.overridden === true) substituted.add(effect.key);
-    }
-  }
-
-  return {
-    arms: logs.length,
-    claimed,
-    excused: substituted.size,
-    ...(contradiction === undefined ? {} : { contradiction }),
-    ok: contradiction === undefined,
-  };
+function controlOf(logs: readonly SharedLog[]): SweepControl {
+  const { runs, ...rest } = holdSharedPrefix(logs);
+  return { arms: runs, ...rest };
 }

@@ -27,10 +27,13 @@ export {
 export {
   compareEvents,
   compareRuns,
+  holdSharedPrefix,
   type Asked,
   type EffectPair,
   type Kinship,
   type RunComparison,
+  type SharedLog,
+  type SharedPrefix,
 } from "./compare.ts";
 export {
   BudgetExceededError,
@@ -137,6 +140,7 @@ export {
   searchForkPoints,
   type SearchOptions,
   type SearchReport,
+  type SearchRun,
   type SearchTrial,
 } from "./search.ts";
 export { DEFAULT_STORE_DIR, MemoryStore, RunStore, fingerprint, newRunId } from "./store.ts";
