@@ -74,6 +74,21 @@ publish contains rather than what changed since something.
   arm was told to substitute. An arm the runtime refuses — an override this fork
   point would serve to nobody is the one that happens — is reported `not_run`
   with the reason, and the other arms still run.
+- **`ablateRun`.** Which of the answers a run collected did its conclusion
+  actually rest on — a question the log holds every half of and cannot settle,
+  because a result that was read and a result that was ignored look identical in
+  it. It forks the run once per recorded tool call, serving a stand-in in place
+  of that call's answer, and reports each call `needed` when the run then
+  answered something else and `spare` when it answered the same thing anyway. The
+  cut is the step *after* the call, which is the tightest the log allows: the
+  drop is still served from the log, the model turn that asked for it and every
+  call beside it replay against exactly what they were recorded with, and nothing
+  below the drop goes `stale`. So each trial is a controlled counterfactual
+  rather than a second run, and the report says so from the trials' own logs —
+  each one replayed its parent's prefix unchanged but for the one substituted
+  value. A fork that did not complete is `inconclusive` rather than counted
+  either way. `only` narrows it to one tool's calls, `instead` names the stand-in,
+  and `maxForks` caps it and says which calls were left alone.
 - **`resume`.** A run killed partway through is carried on from its log: the
   whole prefix replays and execution goes live at the effect the log ends on, so
   a process that died at step 9 of 12 finishes for the price of three steps. It
@@ -387,8 +402,8 @@ publish contains rather than what changed since something.
 ### The CLI
 
 `retrace ls`, `tree`, `show`, `cost`, `diff`, `replay`, `fork`, `plan`,
-`search`, `sweep`, `resume`, `stale`, `report`, `verify`, `recheck`, `export`
-and `import`.
+`search`, `sweep`, `ablate`, `resume`, `stale`, `report`, `verify`, `recheck`,
+`export` and `import`.
 `tree [run-id]` draws the family a run belongs to — every run forked, resumed or
 replayed from it, and from those — with what each one asked that the run above it
 did not: where it cut, what it was told to substitute, and which components moved
@@ -413,6 +428,12 @@ one fork point, printing each arm's answer, the run it made and what its change
 moved, and closing on how much of the prefix all of them replayed identically
 and what the set of them did not spend again. It exits non-zero when an arm did
 not complete or the arms disagree below the fork point.
+`ablate <run-id> --module <path>` drops each recorded tool answer in turn,
+printing the call, what was taken away, the run it made and the answer it got
+without it, and closing on how many of the recorded answers the conclusion
+depends on and what the whole question cost against what it saved. `--instead
+<text>` is the stand-in, `--tool <name>` narrows it to one tool's calls,
+`--max-forks <n>` caps it, and it exits non-zero when a trial never answered.
 `--set <effect-key>=<value>`, on `fork` and `replay`, is the counterfactual.
 `stale <run-id>` reads the run against the one it replayed from and prints both
 sides of everything that moved under its free prefix.
@@ -444,7 +465,7 @@ depend on.
 
 ### Verified by
 
-488 tests that run with no network and no API key, plus two `[live]` integration
+507 tests that run with no network and no API key, plus two `[live]` integration
 tests that skip themselves when `ANTHROPIC_API_KEY` is unset. GitHub Actions
 runs the typecheck, the suite, the build, the demo and a packing dry run on Node
 22 and 24 on every push and pull request. The manifest is under test too:

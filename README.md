@@ -728,6 +728,86 @@ best, and `tree` draws the whole sweep under the run it came from.
 
 In code it is `sweepForkPoint(runId, { provider, tools, atStep, arms })`.
 
+## Which answers the answer needed
+
+A finished run is a conclusion and a pile of things the agent went and looked
+up on the way to it. The log holds every one of those results and says nothing
+at all about which of them the conclusion rests on — a search whose answer went
+straight into the final paragraph and a search whose answer was read and ignored
+are the same two lines in `show`.
+
+The only way to tell them apart is to take one away and see whether the answer
+moves. That used to mean re-running the agent once per call. It now means one
+live tail per call, because everything below the drop comes out of the log:
+
+```bash
+retrace ablate demo-original --module ./agent-module.ts
+```
+
+```
+demo-original  completed  · 4 steps
+analyst · claude-opus-5 · 3 recorded tool calls, each dropped from the step after it
+
+  step:0#0:search  needed   $0.6900 billed · $0.2300 free
+                   dropped {"query":"market size"} → 3 results for "market size"
+                   ablate_20260819T1204_97597cec
+                   Market size unknown. Crowded. Per-seat pricing.
+  step:1#0:search  spare    $0.4600 billed · $0.4600 free
+                   dropped {"query":"competitors"} → 3 results for "competitors"
+                   ablate_20260819T1204_a60929f2
+                   The market is large, contested, and priced per seat.
+  step:2#0:search  needed   $0.2300 billed · $0.6900 free
+                   dropped {"query":"pricing"} → 3 results for "pricing"
+                   ablate_20260819T1204_023c6b9e
+                   The market is large and contested.
+
+2 of 3 recorded answers this run's conclusion depends on
+controlled: each of 3 forks replayed demo-original's prefix unchanged except the one
+value it dropped — 12 effects in all
+3 forks · $1.3800 billed · $1.3800 not spent again out of $2.7600
+```
+
+`spare` at step 1 is the finding. The competitor search ran, cost tokens, went
+into the conversation, and the answer is the same without it — which is a fact
+about that agent that nothing in the log could have told you, and the sort of
+thing you delete a tool call over.
+
+Each trial cuts at the step *after* the call it drops, and that is the whole
+reason this is a measurement rather than a story. It is the tightest cut the log
+allows: the drop is still served from the log, the model turn that asked for the
+call and every call beside it replay against exactly what they were recorded
+with, and the first step to see the changed world is the first step that runs
+live. So nothing below the drop comes back `stale` — unlike
+[an override at a lower fork point](#what-if-it-had-said-something-else), which
+leaves the steps in between answering a conversation that no longer exists. The
+substituted value is the entire difference between the trial and the run.
+
+That is what `controlled` says, and it is checked rather than asserted: each
+trial is a fork of the recorded run, so [`diff` already knows what it owes
+it](#checking-two-logs-against-each-other), and the line is that check run over
+the set. Every trial is a real run in the store, so `show`, `diff` and `verify`
+work on the one that surprised you, and `tree` draws the whole ablation under the
+run it came from.
+
+The stand-in is a choice, and it is yours: `--instead 'the corpus is down'` asks
+a different counterfactual from "no result", and a tool that answers nothing is
+not the same as a tool that errors. What the default asks is the plain version —
+what if this call had come back with nothing.
+
+Three things it will not do. A trial whose fork did not *complete* is
+`inconclusive` rather than `spare`: a run that stopped on a budget or a limit
+never gave an answer, so there is nothing to compare, and reading its silence as
+"the call was not needed" would be the one wrong answer this command can give.
+It drops recorded tool calls and not the [reads inside
+them](#reading-everything-else) — a `ctx.fetch` or a `ctx.read` needs its tool to
+*execute* for a substitution to reach it, which is a fork inside the step and a
+different, costlier question; `fork --at <key> --set` is how to ask it by hand.
+And each call is dropped once, so `spare` is a single draw in the sense
+[`search --repeat`](#one-fork-is-one-draw) is about: a model that would have
+answered the same anyway looks exactly like a result that was never needed.
+
+In code it is `ablateRun(runId, { provider, tools })`.
+
 ## Reading the network
 
 The largest thing a tool does that a log could not follow used to be the one
@@ -1091,6 +1171,7 @@ retrace plan <run-id> --at N  # what that fork would replay, save and go stale o
 retrace search <run-id>       # …fork downward until the change takes, cheapest first
 retrace search … --repeat N   # …cutting each fork point N times, so one draw is not the answer
 retrace sweep <run-id> --at N # …or try several changes at one point, off one prefix
+retrace ablate <run-id>       # drop each recorded answer, and see which the answer needed
 retrace resume <run-id>       # carry on a run that stopped early, from its log
 retrace stale <run-id>        # what moved under the steps it replayed, and to what
 retrace report <run-id>       # write the run as one self-contained HTML page
@@ -1143,7 +1224,9 @@ options, executes none of it, and says what that fork would replay, save and go
 stale on — see [the fork you haven't run yet](#the-fork-you-havent-run-yet).
 `retrace sweep` takes them too, and one more thing from the module: `arms`, the
 changes to try at that fork point — see [several changes at one
-point](#several-changes-at-one-point).
+point](#several-changes-at-one-point). `retrace ablate` takes `--module` and no
+`--at` at all: it works out its own fork points, one per recorded tool call —
+see [which answers the answer needed](#which-answers-the-answer-needed).
 
 Named exports and a `default` object both work. The file is imported for its exports, so it must not run anything at import time — see `examples/research.ts`, which guards its runner behind an entry-point check for exactly that reason. `--module` is optional for `replay`, and only matters there if the log stops short of the run it recorded.
 
@@ -1940,13 +2023,27 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   with nothing varied between them are the model's own temperature. `diff` on
   the two runs is what separates those, and `search` is what asks how far down
   the change would have to go to take.
+- **`ablate` makes the forks too, and what it measures is a stand-in rather than
+  an absence.** Every trial executes its own live tail for real, so the
+  `irreversible` hazard arrives once per recorded call whose tail would repeat
+  one — those trials stop and are reported rather than counted. What a call is
+  held to is the answer you put in its place: "no result" and "the corpus is
+  down" are different questions, and `instead` is which one you asked. The cut
+  is the step after the call, so the trial's replayed prefix is not merely free
+  but still answering what it was recorded against — nothing goes `stale`, and
+  a facet that shows up there is a module declaring tools the run was not
+  recorded with. Two things it cannot say. `spare` is one draw, exactly as a
+  `search` without `--repeat` is: a model that would have answered the same
+  anyway is indistinguishable from a result nothing read. And a fork that did
+  not complete is `inconclusive` and never `spare`, because a run that gave no
+  answer cannot be evidence that it needed nothing.
 - **An override is a counterfactual for the steps above it and nothing else.** Replacing a value changes what the live steps see; the replayed steps between it and the fork point still come out of the log as recorded, and are marked `stale` for it — the model calls on `conversation`, and any tool call whose input the substitution moved on `input`. The fork's log is a truthful record of a run that answered a question its parent never asked — it is not a record of what the parent would have done, because nothing re-ran to find out.
 
 ## Status
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
 one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads — what it asked, body and all, and what came back — inside the boundary, the `ctx.read` that does the same for the database queries, subprocesses and native clients no wrapper can intercept, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log, the `reads` check that holds every journaled read to the call that made it and to the question its own slot is a digest of, and the `conclusion` check that holds a run's reported answer and ending to the response its log ends on, the `diff` comparison that holds two logs to the prefix they claim from the same source and says whether the two runs were asking the same thing where they parted, and the `recheck` re-execution including its `unstable` finding, the watch on the
-ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, the `tree` view that draws a store as the family of runs it actually is, the `search` walk that forks downward until a change takes and reports the cheapest fork point it did, its `--repeat` that cuts each fork point several times so a model that moved the answer on its own comes back `unstable` rather than as a finding, and the `sweep` that tries several changes at one fork point off one replayed prefix and holds the arms to the prefix they shared — is covered by 488 tests that run without network access — including a seeded property check that generates dozens of run shapes and holds each of them to the two guarantees the runtime rests on: a replay reproduces the log effect for effect and executes nothing, and a pure-tools fork at every step reproduces its parent. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, the `tree` view that draws a store as the family of runs it actually is, the `search` walk that forks downward until a change takes and reports the cheapest fork point it did, its `--repeat` that cuts each fork point several times so a model that moved the answer on its own comes back `unstable` rather than as a finding, the `sweep` that tries several changes at one fork point off one replayed prefix and holds the arms to the prefix they shared, and the `ablate` that drops each recorded answer in turn to say which of them the run's conclusion needed — is covered by 507 tests that run without network access — including a seeded property check that generates dozens of run shapes and holds each of them to the two guarantees the runtime rests on: a replay reproduces the log effect for effect and executes nothing, and a pure-tools fork at every step reproduces its parent. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -1954,7 +2051,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 488 tests, no network, no API key
+npm test           # 507 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

@@ -1,3 +1,12 @@
+export {
+  ablateRun,
+  DROPPED,
+  type Ablation,
+  type AblationControl,
+  type AblationOptions,
+  type AblationReport,
+  type AblationTrial,
+} from "./ablate.ts";
 export { AMBIENT_SOURCES, type AmbientSource } from "./ambient.ts";
 export {
   defineAgent,

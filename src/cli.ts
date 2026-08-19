@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { ablateRun, DROPPED, type AblationControl, type AblationTrial } from "./ablate.ts";
 import { orderFacets } from "./agent.ts";
 import { collectBundle, importBundle, parseBundle, serializeBundle } from "./bundle.ts";
 import { compareRuns, type EffectPair, type RunComparison } from "./compare.ts";
@@ -23,7 +24,13 @@ import {
   summarize,
   type ForkPoint,
 } from "./replay.ts";
-import { executed, recheckRun, type RecheckReport, type RecheckStatus } from "./recheck.ts";
+import {
+  executed,
+  recheckRun,
+  recordedToolCalls,
+  type RecheckReport,
+  type RecheckStatus,
+} from "./recheck.ts";
 import { renderReport } from "./report.ts";
 import { searchForkPoints } from "./search.ts";
 import { DEFAULT_STORE_DIR, RunStore } from "./store.ts";
@@ -51,6 +58,8 @@ const USAGE = `retrace — inspect and re-run recorded agent runs
                                 which step it did and what the search cost
   retrace sweep <run-id> --at N try several changes at one fork point, off one
                                 replayed prefix, and put the answers side by side
+  retrace ablate <run-id>       drop each recorded tool answer in turn, and say
+                                which of them the run's conclusion needed
   retrace resume <run-id>       carry on a run that stopped early, from its log
   retrace stale <run-id>        say what moved under the steps it replayed, by
                                 reading the run it replayed them from
@@ -75,7 +84,11 @@ Options
                             at the first fork point whose answer is not the
                             recorded one
   --down-to <n>             the lowest fork point search may try (default 0)
-  --max-forks <n>           give up after this many forks, whatever --down-to says
+  --max-forks <n>           give up after this many forks, whatever --down-to
+                            says. Caps ablate's forks the same way
+  --instead <text>          what ablate serves in place of a dropped answer
+                            (default "${DROPPED}"). The counterfactual it asks
+                            is "what if the call had said this"
   --repeat <n>              cut each of search's fork points n times instead of
                             once (default 1). A fork point holds only if every
                             fork made at it answers the same way, so a model
@@ -94,11 +107,13 @@ Options
                             found". Repeatable; the key must be below --at.
   --on-divergence <policy>  strict (default) stops when the log disagrees with
                             the loop; live executes from that point instead
-  --tool <name>             limit recheck to this tool. Repeatable. Everything
-                            it runs, it runs for real — this is how you keep it
-                            away from a tool that writes something. A call that
-                            disagrees with the log is run a second time, to tell
-                            a moved corpus from a tool with no settled answer
+  --tool <name>             limit recheck and ablate to this tool. Repeatable.
+                            What recheck runs, it runs for real — this is how
+                            you keep it away from a tool that writes something.
+                            A call that disagrees with the log is run a second
+                            time, to tell a moved corpus from a tool with no
+                            settled answer. For ablate it picks which recorded
+                            answers are dropped
   --allow-irreversible      execute tools marked irreversible. Without it, a
                             fork, resume or replay stops rather than making such
                             a call a second time, and recheck holds it back
@@ -144,6 +159,7 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
   const overrides = readOverrides(takeEvery(args, "--set"));
   const onDivergence = readPolicy(takeOption(args, "--on-divergence"));
   const only = takeEvery(args, "--tool");
+  const instead = takeOption(args, "--instead");
   const until = takeOption(args, "--until");
   const downTo = readCount(takeOption(args, "--down-to"), "--down-to");
   const maxForks = readCount(takeOption(args, "--max-forks"), "--max-forks");
@@ -181,6 +197,8 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       });
     case "sweep":
       return cmdSweep(io, store, rest[0], atRaw, modulePath, reentry);
+    case "ablate":
+      return cmdAblate(io, store, rest[0], modulePath, reentry, { only, instead, maxForks });
     case "resume":
       return cmdResume(io, store, rest[0], modulePath, reentry);
     case "stale":
@@ -1200,6 +1218,107 @@ function controlLine(control: {
     green("controlled") +
     `: ${plural(control.claimed, "effect")} replayed identically by all ` +
     `${plural(control.arms, "arm")}${substituted}`
+  );
+}
+
+/**
+ * Take each recorded answer away in turn and see whether the run still arrives
+ * where it did. Every trial replays everything up to the call it drops, so the
+ * whole question costs one live tail per call rather than one run per call.
+ */
+async function cmdAblate(
+  io: Io,
+  store: RunStore,
+  runId: string | undefined,
+  modulePath: string | undefined,
+  { onDivergence, allowIrreversible }: Reentry,
+  narrow: { only: readonly string[]; instead: string | undefined; maxForks: number | undefined },
+): Promise<number> {
+  if (!runId) return fail(io, "ablate needs a run id");
+  if (modulePath === undefined) {
+    return fail(io, "ablate needs --module <path>: the tools and provider its live tails run");
+  }
+
+  const parent = inspect(runId, store);
+  const mod = await loadRunModule(modulePath);
+  const calls = recordedToolCalls(store.read(runId));
+
+  io.out(`${bold(runId)}  ${statusLabel(parent.status)}  ${dim(`· ${plural(parent.steps, "step")}`)}\n`);
+  io.out(
+    dim(
+      `${parent.agent.name} · ${parent.agent.model} · ` +
+        `${plural(calls.length, "recorded tool call")}, each dropped from the step after it\n\n`,
+    ),
+  );
+  if (calls.length === 0) {
+    io.out(dim("this run records no tool calls, so its answer rests on nothing to take away\n"));
+    return 0;
+  }
+
+  const width = Math.max(...calls.map((c) => c.key.length));
+  const report = await ablateRun(runId, {
+    provider: mod.provider ?? (await anthropic()),
+    tools: mod.tools ?? [],
+    budget: mod.budget,
+    store,
+    ...(narrow.only.length > 0 ? { only: narrow.only } : {}),
+    ...(narrow.instead === undefined ? {} : { instead: narrow.instead }),
+    ...(narrow.maxForks === undefined ? {} : { maxForks: narrow.maxForks }),
+    onDivergence: onDivergence ?? "strict",
+    allowIrreversible,
+    onTrial: (trial) => printAblation(io, trial, width),
+  });
+
+  const tried = report.trials.length;
+  io.out(
+    `\n${report.needed} of ${plural(tried, "recorded answer")} this run's conclusion depends on\n`,
+  );
+  if (report.stopped !== undefined) io.out(dim(`${report.stopped}\n`));
+  io.out(`${ablationControlLine(report.control, runId)}\n`);
+  io.out(
+    dim(
+      `${plural(report.control.forks, "fork")} · ${formatUsd(report.billedUsd)} billed · ` +
+        `${formatUsd(report.savedUsd)} not spent again out of ${formatUsd(report.costUsd)}\n`,
+    ),
+  );
+  return report.control.ok && report.trials.every((t) => t.verdict !== "inconclusive") ? 0 : 1;
+}
+
+function printAblation(io: Io, trial: AblationTrial, width: number): void {
+  const paint =
+    trial.verdict === "needed" ? cyan : trial.verdict === "spare" ? dim : (s: string) => yellow(s);
+  const label = trial.verdict === "inconclusive" ? statusLabel(trial.status) : paint(trial.verdict);
+  const stale = trial.staleFacets.length > 0 ? dim(`  ${trial.staleFacets.join(", ")}`) : "";
+  const indent = `  ${" ".repeat(width)}  `;
+
+  io.out(
+    `  ${trial.key.padEnd(width)}  ${padLabel(label, 8)} ` +
+      dim(`${formatUsd(trial.billedUsd)} billed · ${formatUsd(trial.savedUsd)} free`) +
+      `${stale}\n`,
+  );
+  // The answer that was taken away, then the answer the run gave without it —
+  // the two lines the verdict is a comparison of. Each trial is a run of its
+  // own, so its id goes between them: show, diff and verify all want it.
+  io.out(
+    `${indent}${dim(`dropped ${truncate(JSON.stringify(trial.input), 30)} → `)}` +
+      `${dim(truncate(trial.recorded.content, 40))}\n`,
+  );
+  io.out(`${indent}${dim(trial.runId)}\n`);
+  io.out(`${indent}${truncate(trial.error ?? trial.output, 68)}\n`);
+}
+
+/**
+ * What each trial owed the run it came from: the prefix below its drop, held
+ * unchanged. It is the claim that makes an ablation a counterfactual rather
+ * than a second run — the substituted value is the whole of the difference.
+ */
+function ablationControlLine(control: AblationControl, runId: string): string {
+  if (!control.ok) return `${red("not controlled")}: ${control.contradiction}`;
+  if (control.forks === 0) return dim("no fork ran, so there was nothing to hold to a prefix");
+  return (
+    green("controlled") +
+    `: each of ${plural(control.forks, "fork")} replayed ${runId}'s prefix unchanged ` +
+    `except the one value it dropped — ${plural(control.claimed, "effect")} in all`
   );
 }
 
