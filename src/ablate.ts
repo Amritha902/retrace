@@ -32,6 +32,25 @@ export type Ablation =
  */
 export type Instability = "cut" | "answer";
 
+/**
+ * What dropping every spare answer at once did to the run's conclusion.
+ *
+ * `spare` is a verdict about one value with all the others still in place, and
+ * it does not compose: two calls that say the same thing are each droppable
+ * while the other stands, and the run needs one of them. Taken one at a time
+ * that reads as two spares, which is the one finding here a reader would act on
+ * and shouldn't.
+ */
+export type Joint =
+  /** The conclusion held with all of them gone, so the spares are spare together. */
+  | "held"
+  /** It did not: the spares were covering for one another, and at least one is needed. */
+  | "covered"
+  /** The fork did not finish, so there is no answer to compare. */
+  | "inconclusive"
+  /** Nothing about the joint drop can be read off it — see `Instability`. */
+  | "unstable";
+
 /** The value served in place of a dropped answer, unless the caller names another. */
 export const DROPPED = "(no result)";
 
@@ -147,6 +166,59 @@ export interface AblationBaseline {
 }
 
 /**
+ * Every spare answer dropped at once.
+ *
+ * The trials take one value away each, and a set of `spare` verdicts is read —
+ * by the closing line of an ablation, among others — as *the run did without
+ * these*. That reading is a claim no trial made. Two calls that answer the same
+ * question are individually droppable and jointly load-bearing: drop the first
+ * and the second carries the conclusion, drop the second and the first does,
+ * drop both and the run has nothing. Reported one at a time, that is two spares
+ * and an answer the run cannot actually do without.
+ *
+ * One fork settles it, whatever the number of spares: drop all of them and see
+ * whether the conclusion is still the recorded one. Two or more spares is the
+ * only case worth the fork — one spare's joint drop is the trial that already
+ * ran.
+ *
+ * What it cannot be is as tight a cut as a trial. The drops sit at different
+ * steps and a fork has one fork point, so the cut goes after the last of them
+ * and the steps in between replay against a conversation that no longer holds
+ * the earlier drops — `staleFacets` carries `conversation` for it, and those
+ * steps are the recorded run's answers to a question this fork is no longer
+ * asking. The live tail is the part that sees every drop at once, which is
+ * where the conclusion is made.
+ */
+export interface AblationTogether {
+  /** The cut, which is the step after the last of the spare calls. */
+  atStep: number;
+  /** The keys dropped, in the order the run made the calls. */
+  keys: string[];
+  /** The forks made with all of them dropped, in the order they were made. */
+  runs: AblationRun[];
+  /** The first of them, which the three fields below describe. */
+  runId: string;
+  status: RunStatus;
+  output: string;
+  error?: string;
+  verdict: Joint;
+  /** How many of these forks answered what the first one did. */
+  alike: number;
+  instability?: Instability;
+  /** Effects one of these forks replayed from the recorded run. */
+  claimed: number;
+  /**
+   * Components of the request the replayed prefix no longer answers.
+   * `conversation` is expected here and is not a fault: unlike a trial, this cut
+   * is above drops that are not the last one.
+   */
+  staleFacets: string[];
+  costUsd: number;
+  billedUsd: number;
+  savedUsd: number;
+}
+
+/**
  * Whether the forks were counterfactuals, checked rather than assumed.
  *
  * Each one is held against the run it came from rather than against the others,
@@ -160,7 +232,10 @@ export interface AblationControl {
   forks: number;
   /** Effects they replayed from it, over all of them. */
   claimed: number;
-  /** Positions inside those a fork was told to drop: one apiece. */
+  /**
+   * Positions inside those a fork was told to drop — one per trial fork, and
+   * one per spare on each fork of the joint drop.
+   */
   excused: number;
   /**
    * Reads above each trial's cut that it took out of the run's own key table
@@ -176,6 +251,13 @@ export interface AblationControl {
    */
   baselines: number;
   baselineClaimed: number;
+  /**
+   * Forks of the joint drop held the same way, and the effects they replayed.
+   * They owe the run every position they replayed except the spares they were
+   * told to drop, which are counted in `excused` with the trials'.
+   */
+  together: number;
+  togetherClaimed: number;
   /** Set when a fork's replayed prefix is not the prefix the run recorded. */
   contradiction?: string;
   ok: boolean;
@@ -199,6 +281,12 @@ export interface AblationReport {
   trials: AblationTrial[];
   /** One per cut the trials made, in cut order. Empty when they were skipped. */
   baselines: AblationBaseline[];
+  /**
+   * Every spare answer dropped at once, when there were two or more of them to
+   * drop. Absent otherwise: with one spare the joint drop is its own trial, and
+   * with none there is nothing to take away.
+   */
+  together?: AblationTogether;
   /** How many times each answer was dropped. One unless the caller asked for more. */
   repeat: number;
   /** How many dropped answers moved the conclusion, and how many did not. */
@@ -235,6 +323,13 @@ export interface AblationOptions
    */
   baseline?: boolean;
   /**
+   * Drop every spare answer at once, once the trials have said which they are.
+   * On by default, and it costs `repeat` forks however many spares there are.
+   * Without it a set of `spare` verdicts is reported without the one check that
+   * says they hold together — see `AblationTogether`.
+   */
+  together?: boolean;
+  /**
    * How many times to make each drop. One by default, which is one draw of
    * whatever the model does with that value taken away.
    *
@@ -250,6 +345,8 @@ export interface AblationOptions
   onTrial?: (trial: AblationTrial) => void;
   /** Called as each baseline finishes, before any trial measured against it. */
   onBaseline?: (baseline: AblationBaseline) => void;
+  /** Called after the joint drop, which runs once every trial has a verdict. */
+  onTogether?: (together: AblationTogether) => void;
 }
 
 /**
@@ -275,6 +372,11 @@ export interface AblationOptions
  * serves every trial cutting at the same step. That rules out the cut; what it
  * cannot rule out is the drop itself being answered two ways, and `repeat` is
  * what asks about that, by making each drop more than once.
+ *
+ * What no trial can rule out at all is the other trials. Each one drops its
+ * value with every other value still in place, so a set of `spare` verdicts is
+ * a set of one-at-a-time facts and not the claim they add up to. One more fork
+ * drops all the spares at once and holds them to it — see `AblationTogether`.
  *
  * The trials run one after another rather than at once, for the reason a sweep's
  * arms do: the tails execute tools, and this is not the place to introduce a
@@ -416,8 +518,68 @@ export async function ablateRun(
     options.onTrial?.(trial);
   }
 
+  // Which calls the trials found the run did without, one at a time. Two is the
+  // floor: one spare taken away on its own is the trial that already ran, and
+  // making it again would be asking a question with a recorded answer.
+  const spares = trials.filter((t) => t.verdict === "spare");
+  let together: AblationTogether | undefined;
+  let claimedByTogether = 0;
+  if (options.together !== false && spares.length > 1) {
+    // After the last of them, because a fork has one fork point and every drop
+    // has to be below it to be served from the log at all. The steps between
+    // the earlier drops and the cut replay stale for it, which is the price of
+    // asking about the set rather than about one value.
+    const atStep = Math.max(...spares.map((t) => t.step)) + 1;
+    const overrides = Object.fromEntries(spares.map((t) => [t.key, instead]));
+    const runs: AblationRun[] = [];
+    let claimed = 0;
+    let facets: string[] = [];
+    for (let cut = 0; cut < repeat; cut++) {
+      const result = await fork(parentRunId, {
+        ...options,
+        atStep,
+        overrides,
+        store,
+        runId: newRunId("ablate"),
+      });
+      const held = compareEvents(parentRunId, events, result.runId, result.events);
+      contradiction ??= held.contradiction;
+      excused += held.excused;
+      claimedByTogether += held.claimed;
+      keptByTrials += held.world.held.length;
+      claimed = held.claimed;
+      if (cut === 0) facets = staleFacets(result.events);
+      runs.push(runOf(result));
+    }
+
+    const first = runs[0]!;
+    const alike = runs.filter((r) => sameAnswer(r, first)).length;
+    together = {
+      atStep,
+      keys: spares.map((t) => t.key),
+      runs,
+      runId: first.runId,
+      status: first.status,
+      output: first.output,
+      ...(first.error === undefined ? {} : { error: first.error }),
+      verdict: jointOf(
+        first.status,
+        first.output,
+        parent.output,
+        alike === runs.length,
+        byCut.get(atStep),
+      ),
+      alike,
+      ...instabilityOf(alike === runs.length, byCut.get(atStep)),
+      claimed,
+      staleFacets: facets,
+      ...totals(runs),
+    };
+    options.onTogether?.(together);
+  }
+
   const sum = (of: (r: { costUsd: number; billedUsd: number; savedUsd: number }) => number) =>
-    [...trials, ...baselines].reduce((n, r) => n + of(r), 0);
+    [...trials, ...baselines, ...(together ? [together] : [])].reduce((n, r) => n + of(r), 0);
 
   return {
     runId: parentRunId,
@@ -426,6 +588,7 @@ export async function ablateRun(
     instead,
     trials,
     baselines,
+    ...(together === undefined ? {} : { together }),
     repeat,
     needed: trials.filter((t) => t.verdict === "needed").length,
     spare: trials.filter((t) => t.verdict === "spare").length,
@@ -437,6 +600,8 @@ export async function ablateRun(
       kept: keptByTrials,
       baselines: baselines.length * repeat,
       baselineClaimed: claimedByBaselines,
+      together: together === undefined ? 0 : together.runs.length,
+      togetherClaimed: claimedByTogether,
       ...(contradiction === undefined ? {} : { contradiction }),
       ok: contradiction === undefined,
     },
@@ -475,6 +640,26 @@ function verdictOf(
   if (status !== "completed") return "inconclusive";
   if (baseline !== undefined && !baseline.reproduced) return "unstable";
   return output === recorded ? "spare" : "needed";
+}
+
+/**
+ * What the joint drop says about the spares it took away.
+ *
+ * The rules are a trial's rules — a fork that did not settle, did not complete
+ * or cut where the run does not reproduce says nothing here either — and only
+ * the two verdicts it can reach are different, because the question is about a
+ * set rather than a value: the conclusion held without all of them, or they
+ * were covering for one another.
+ */
+function jointOf(
+  status: RunStatus,
+  output: string,
+  recorded: string,
+  settled: boolean,
+  baseline: AblationBaseline | undefined,
+): Joint {
+  const verdict = verdictOf(status, output, recorded, settled, baseline);
+  return verdict === "spare" ? "held" : verdict === "needed" ? "covered" : verdict;
 }
 
 /**

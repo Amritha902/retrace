@@ -979,6 +979,62 @@ of one. What `--repeat` still cannot do is make a `spare` a proof — it narrows
 the odds, exactly as [`search --repeat`](#one-fork-is-one-draw) does, and the
 recorded run remains the one sample nothing here can take again.
 
+### The spares, taken together
+
+Every verdict above is about one value with all the others still in place. The
+line under them — *2 of 3 recorded answers this run's conclusion depends on* —
+is about the set, and no trial made that claim. The gap between the two is a
+pair of calls that say the same thing:
+
+```
+  step:0#0:lookup  spare    $0.0225 billed · $0.007500 free
+                   dropped {"term":"mirror-a"} → definition of mirror-a
+  step:1#0:lookup  spare    $0.0150 billed · $0.0150 free
+                   dropped {"term":"mirror-b"} → definition of mirror-b
+```
+
+Drop the first and the second carries the conclusion. Drop the second and the
+first does. Both are `spare`, both readings are true, and a run that dropped
+both would have nothing. That is the one finding here somebody would act on and
+shouldn't, and one more fork settles it however many spares there are — drop
+all of them at once and see where the run ends up:
+
+```
+$ retrace ablate demo-mirrors --module ./agent-module.ts
+...
+  the spares       covered  $0.0150 billed · $0.0150 free  conversation
+                   dropped step:0#0:lookup, step:1#0:lookup at once
+                   ablate_20260819T1027_f2d5db0f
+                   unverified: definition of gamma
+
+1 of 3 recorded answers this run's conclusion depends on
+covered: the 2 spare answers above are not spare together
+  dropped at once the run answered something else, so at least one of them is carrying the
+  conclusion and each reads as spare only while the others stand
+```
+
+`covered` exits non-zero, because the count above it is the claim the joint drop
+just refused. The trials themselves stand — each is still a true statement about
+one value — and what has gone is the arithmetic somebody would do with them.
+When they do add up the line says so, quietly, and the ablation exits zero:
+
+```
+together: all 2 spare answers dropped at once, and the run still arrived at the recorded answer
+```
+
+Two spares is the floor: one spare taken away on its own is the trial that
+already ran. And this is the one cut in an ablation that is not the tightest the
+log allows — the drops sit at different steps, a fork has one fork point, so the
+cut goes after the last of them and the steps in between replay against a
+conversation that no longer holds the earlier drops. They come back
+`stale (conversation)` for it, exactly as [an override at a lower fork
+point](#what-if-it-had-said-something-else) does, and it is printed beside the
+verdict rather than left for you to work out. The live tail is the part that
+sees every drop at once, and the live tail is where the conclusion is made.
+
+`--no-together` skips it, and then a column of `spare` verdicts is what it was
+before: a set of one-at-a-time facts, and the sum of them is your guess.
+
 In code it is `ablateRun(runId, { provider, tools, repeat })`.
 
 ## Reading the network
@@ -1348,6 +1404,7 @@ retrace sweep … --repeat N    # …cutting each arm N times, so one draw is no
 retrace ablate <run-id>       # drop each recorded answer, and see which the answer needed
 retrace ablate … --repeat N   # …making each drop N times, so one draw is not the dependency
 retrace ablate … --no-baseline # …without re-entering each cut to check the run reproduces
+retrace ablate … --no-together # …without the one fork that drops every spare answer at once
 retrace resume <run-id>       # carry on a run that stopped early, from its log
 retrace stale <run-id>        # what moved under the steps it replayed, and to what
 retrace report <run-id>       # write the run as one self-contained HTML page
@@ -2285,13 +2342,26 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   was sampled rather than proved, in the sense `search --repeat` is about. And a
   fork that did not complete is `inconclusive` and never `spare`, because a run
   that gave no answer cannot be evidence that it needed nothing.
+- **A `spare` is one value with every other one still in place, and it does not
+  compose.** Two calls that answer the same question are each droppable while
+  the other stands, so one-at-a-time they are two spares and the conclusion
+  needs one of them. The count an ablation closes on is a claim about the set
+  that no trial made, so one more fork drops every spare at once and holds them
+  to it: `held` is the arithmetic surviving, and `covered` is it not, exits
+  non-zero and names the reading it just refused. The trials are untouched
+  either way — each of them is still true about the value it took away. What
+  this cut cannot be is as tight as a trial's: the drops sit at different steps
+  and a fork has one fork point, so it goes after the last of them and the steps
+  in between replay `stale (conversation)`, which is printed rather than
+  glossed. It is one fork however many spares there are — `repeat` cuts it that
+  many times, and `--no-together` is how you decline to ask.
 - **An override is a counterfactual for the steps above it and nothing else.** Replacing a value changes what the live steps see; the replayed steps between it and the fork point still come out of the log as recorded, and are marked `stale` for it — the model calls on `conversation`, and any tool call whose input the substitution moved on `input`. The fork's log is a truthful record of a run that answered a question its parent never asked — it is not a record of what the parent would have done, because nothing re-ran to find out.
 
 ## Status
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
 one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads — what it asked, body and all, and what came back — inside the boundary, the `ctx.read` that does the same for the database queries, subprocesses and native clients no wrapper can intercept, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log, the `reads` check that holds every journaled read to the call that made it and to the question its own slot is a digest of, and the `conclusion` check that holds a run's reported answer and ending to the response its log ends on, the `diff` comparison that holds two logs to the prefix they claim from the same source, to the world their live tails took out of it above that prefix, and says whether the two runs were asking the same thing where they parted, and the `recheck` re-execution including its `unstable` finding, the watch on the
-ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, the `tree` view that draws a store as the family of runs it actually is, the `search` walk that forks downward until a change takes and reports the cheapest fork point it did, its `--repeat` that cuts each fork point several times so a model that moved the answer on its own comes back `unstable` rather than as a finding, the `sweep` that tries several changes at one fork point off one replayed prefix and holds the arms to the prefix they shared, its `--repeat` that cuts each arm several times so an arm whose answer moved on its own comes back `unstable` rather than as a difference between it and the arms beside it, and the `ablate` that drops each recorded answer in turn to say which of them the run's conclusion needed, re-entering each of its cuts with nothing dropped so a run that does not reproduce from one comes back `unstable` rather than as a dependency, and its `--repeat` that makes each drop several times so a run with two answers to one gap comes back `unstable` rather than as a call it did or did not need — is covered by 542 tests that run without network access — including a seeded property check that generates dozens of run shapes and holds each of them to the two guarantees the runtime rests on: a replay reproduces the log effect for effect and executes nothing, and a pure-tools fork at every step reproduces its parent. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, the `tree` view that draws a store as the family of runs it actually is, the `search` walk that forks downward until a change takes and reports the cheapest fork point it did, its `--repeat` that cuts each fork point several times so a model that moved the answer on its own comes back `unstable` rather than as a finding, the `sweep` that tries several changes at one fork point off one replayed prefix and holds the arms to the prefix they shared, its `--repeat` that cuts each arm several times so an arm whose answer moved on its own comes back `unstable` rather than as a difference between it and the arms beside it, and the `ablate` that drops each recorded answer in turn to say which of them the run's conclusion needed, re-entering each of its cuts with nothing dropped so a run that does not reproduce from one comes back `unstable` rather than as a dependency, its `--repeat` that makes each drop several times so a run with two answers to one gap comes back `unstable` rather than as a call it did or did not need, and the one further fork that drops every spare answer at once, so two calls covering for one another come back `covered` rather than as two answers the run did without — is covered by 553 tests that run without network access — including a seeded property check that generates dozens of run shapes and holds each of them to the two guarantees the runtime rests on: a replay reproduces the log effect for effect and executes nothing, and a pure-tools fork at every step reproduces its parent. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -2299,7 +2369,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 542 tests, no network, no API key
+npm test           # 553 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

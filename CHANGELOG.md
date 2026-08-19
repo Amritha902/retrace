@@ -131,6 +131,24 @@ publish contains rather than what changed since something.
   Every fork is held to the prefix it replayed as before, `maxForks` now counts
   forks rather than calls so a cap that cannot afford a whole drop does not make
   half of one, and the totals cover every fork made.
+- **The spares, dropped together**, because `spare` is a verdict about one value
+  with every other one still in place and it does not compose. Two calls that
+  answer the same question are each droppable while the other stands, so
+  one-at-a-time they report as two spares and the run needs one of them — and
+  the count an ablation closes on is a claim about the set that no trial made.
+  One further fork drops every spare at once and holds them to it: `held` when
+  the conclusion survived all of them going, `covered` when it did not, which
+  names at least one spare as load-bearing and exits non-zero, since the count
+  above it is the reading the fork just refused. The trials are unchanged either
+  way. It is one fork however many spares there are, `repeat` cuts it that many
+  times and it settles only if every cut agreed, and it is held to the prefix it
+  replayed exactly as the trials are, with the spares it dropped excused. Two
+  spares is the floor — one spare's joint drop is the trial that already ran —
+  and this is the one cut in an ablation that cannot be the tightest the log
+  allows: the drops sit at different steps and a fork has one fork point, so it
+  goes after the last of them and the steps in between come back
+  `stale (conversation)`, reported beside the verdict. `together: false`
+  (`--no-together`) declines to ask.
 - **`resume`.** A run killed partway through is carried on from its log: the
   whole prefix replays and execution goes live at the effect the log ends on, so
   a process that died at step 9 of 12 finishes for the price of three steps. It

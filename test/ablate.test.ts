@@ -21,6 +21,11 @@ import {
   type RunStore as Store,
 } from "../src/index.ts";
 import { provider, tools } from "./fixtures/ablate-module.ts";
+import { provider as covering, tools as coveringTools } from "./fixtures/ablate-cover-module.ts";
+import {
+  provider as spareProvider,
+  tools as spareTools,
+} from "./fixtures/ablate-spares-module.ts";
 import {
   provider as wobbly,
   resetWobble,
@@ -37,6 +42,8 @@ import { tools as movingTools } from "./fixtures/moving-module.ts";
 const MODULE = fileURLToPath(new URL("./fixtures/ablate-module.ts", import.meta.url));
 const MOVING_MODULE = fileURLToPath(new URL("./fixtures/moving-module.ts", import.meta.url));
 const WOBBLE_MODULE = fileURLToPath(new URL("./fixtures/ablate-wobble-module.ts", import.meta.url));
+const COVER_MODULE = fileURLToPath(new URL("./fixtures/ablate-cover-module.ts", import.meta.url));
+const SPARES_MODULE = fileURLToPath(new URL("./fixtures/ablate-spares-module.ts", import.meta.url));
 
 const agent = defineAgent({
   name: "researcher",
@@ -860,4 +867,229 @@ test("retrace ablate needs a run and the module its live tails run", async (t: T
   const noModule = capture();
   assert.equal(await main(["ablate", "baseline", "--dir", dir], noModule), 1);
   assert.match(plain(noModule.text), /ablate needs --module/);
+});
+
+/**
+ * A run whose first two lookups say the same thing, and a conclusion that needs
+ * one of them. Dropped one at a time they are two spares; dropped together they
+ * are the answer.
+ */
+async function recordCovering(store: Store): Promise<void> {
+  await run("explain them", {
+    agent,
+    provider: covering,
+    tools: coveringTools,
+    store,
+    runId: "baseline",
+  });
+}
+
+/** A run with two answers in it that nothing depends on, separately or together. */
+async function recordSpares(store: Store): Promise<void> {
+  await run("explain them", {
+    agent,
+    provider: spareProvider,
+    tools: spareTools,
+    store,
+    runId: "baseline",
+  });
+}
+
+test("two answers covering for each other read spare one at a time", async () => {
+  const store = new MemoryStore();
+  await recordCovering(store);
+
+  const report = await ablateRun("baseline", {
+    provider: covering,
+    tools: coveringTools,
+    store,
+    together: false,
+  });
+
+  assert.equal(report.recorded, "verified: definition of gamma");
+  assert.deepEqual(
+    report.trials.map((t) => t.verdict),
+    ["spare", "spare", "needed"],
+    "each mirror is droppable while the other stands, which is true and not the whole truth",
+  );
+  assert.equal(report.spare, 2);
+  assert.equal(report.together, undefined, "not asked for, so not answered");
+});
+
+test("dropped together, the spares that were covering for each other come back covered", async () => {
+  const store = new MemoryStore();
+  await recordCovering(store);
+
+  const report = await ablateRun("baseline", { provider: covering, tools: coveringTools, store });
+
+  const together = report.together;
+  assert.ok(together, "two spares is what the joint drop exists for");
+  assert.equal(together.verdict, "covered");
+  assert.deepEqual(together.keys, ["step:0#0:lookup", "step:1#0:lookup"]);
+  // After the last of the spares, since a fork has one fork point and every
+  // drop below it is what gets served from the log.
+  assert.equal(together.atStep, 2);
+  assert.equal(together.output, "unverified: definition of gamma");
+  assert.equal(together.alike, 1);
+  assert.equal(together.instability, undefined);
+  // The trials are untouched by it: each of them is still a true statement
+  // about one value with the others in place.
+  assert.equal(report.spare, 2);
+});
+
+test("the joint drop is not as tight a cut as a trial, and says so", async () => {
+  const store = new MemoryStore();
+  await recordCovering(store);
+
+  const report = await ablateRun("baseline", { provider: covering, tools: coveringTools, store });
+
+  for (const trial of report.trials) {
+    assert.deepEqual(trial.staleFacets, [], "a trial cuts at the step after its one drop");
+  }
+  // The joint cut is above every drop but the last, so the steps between the
+  // first drop and the cut replay against a conversation this fork no longer
+  // builds — the ordinary reading of an override at a lower fork point.
+  assert.deepEqual(report.together?.staleFacets, ["conversation"]);
+});
+
+test("spares that were not covering for anything hold together", async () => {
+  const store = new MemoryStore();
+  await recordSpares(store);
+
+  const report = await ablateRun("baseline", {
+    provider: spareProvider,
+    tools: spareTools,
+    store,
+  });
+
+  assert.deepEqual(
+    report.trials.map((t) => t.verdict),
+    ["needed", "spare", "spare", "needed"],
+  );
+  assert.equal(report.together?.verdict, "held");
+  assert.equal(report.together?.atStep, 3);
+  assert.equal(report.together?.output, report.recorded);
+});
+
+test("one spare is its own joint drop, so no fork is made for it", async () => {
+  const store = new MemoryStore();
+  await record(store);
+
+  const report = await ablateRun("baseline", { provider, tools, store });
+
+  assert.equal(report.spare, 1);
+  assert.equal(report.together, undefined);
+  assert.equal(report.control.together, 0);
+});
+
+test("the joint drop is held to the prefix it replayed, and every value it took away is named", async () => {
+  const store = new MemoryStore();
+  await recordCovering(store);
+
+  const report = await ablateRun("baseline", { provider: covering, tools: coveringTools, store });
+
+  assert.equal(report.control.ok, true);
+  assert.equal(report.control.together, 1);
+  assert.ok(report.control.togetherClaimed > 0);
+  // Three trial drops and the two the joint fork made, which is what keeps its
+  // replayed prefix a prefix of the run rather than a contradiction of it.
+  assert.equal(report.control.excused, 5);
+
+  const held = compareRuns("baseline", report.together!.runId, store);
+  assert.equal(held.ok, true);
+  assert.equal(held.excused, 2, "the two spares, and nothing else in the prefix");
+
+  const spent = [...report.trials, ...report.baselines, report.together!];
+  assert.ok(
+    Math.abs(report.costUsd - spent.reduce((n, r) => n + r.costUsd, 0)) < 1e-9,
+    "the joint drop is a fork the command made, so it is in the price of it",
+  );
+});
+
+test("the joint drop is made as many times as the drops, and holds only if all of them agree", async () => {
+  const store = new MemoryStore();
+  await recordCovering(store);
+
+  const report = await ablateRun("baseline", {
+    provider: covering,
+    tools: coveringTools,
+    store,
+    repeat: 2,
+  });
+
+  assert.equal(report.together?.runs.length, 2);
+  assert.equal(report.together?.alike, 2);
+  assert.equal(report.together?.verdict, "covered");
+  assert.equal(report.control.together, 2);
+});
+
+test("the joint drop can be skipped, and then the spares are only spare one at a time", async () => {
+  const store = new MemoryStore();
+  await recordCovering(store);
+
+  const report = await ablateRun("baseline", {
+    provider: covering,
+    tools: coveringTools,
+    store,
+    together: false,
+  });
+
+  assert.equal(report.together, undefined);
+  assert.equal(report.control.together, 0);
+  assert.equal(report.control.togetherClaimed, 0);
+});
+
+test("retrace ablate says the spares were covering for each other, and does not exit quietly", async (t: TestContext) => {
+  const { dir, store } = diskStore(t);
+  await recordCovering(store);
+
+  const io = capture();
+  const code = await main(["ablate", "baseline", "--dir", dir, "--module", COVER_MODULE], io);
+  const text = plain(io.text);
+
+  assert.equal(code, 1, "the count above it is a claim about the set, and the set did not hold");
+  assert.match(text, /step:0#0:lookup\s+spare/);
+  assert.match(text, /step:1#0:lookup\s+spare/);
+  assert.match(text, /1 of 3 recorded answers this run's conclusion depends on/);
+  assert.match(text, /the spares\s+covered/);
+  assert.match(text, /dropped step:0#0:lookup, step:1#0:lookup at once/);
+  assert.match(text, /covered: the 2 spare answers above are not spare together/);
+  assert.match(text, /so at least one of them is carrying the/);
+  assert.match(text, /conclusion and each reads as spare only while the others stand/);
+  assert.match(text, /and 1 fork replayed it with every spare dropped — \d+ effects more/);
+  // Three drops, the three cuts they were made at, and the one joint drop.
+  assert.match(text, /7 forks · \$/);
+});
+
+test("retrace ablate --no-together leaves the spares as they were read one at a time", async (t: TestContext) => {
+  const { dir, store } = diskStore(t);
+  await recordCovering(store);
+
+  const io = capture();
+  const code = await main(
+    ["ablate", "baseline", "--dir", dir, "--module", COVER_MODULE, "--no-together"],
+    io,
+  );
+  const text = plain(io.text);
+
+  assert.equal(code, 0, text);
+  assert.doesNotMatch(text, /covered/);
+  assert.doesNotMatch(text, /the spares/);
+  assert.match(text, /6 forks · \$/);
+});
+
+test("retrace ablate says when the spares held together", async (t: TestContext) => {
+  const { dir, store } = diskStore(t);
+  await recordSpares(store);
+
+  const io = capture();
+  const code = await main(["ablate", "baseline", "--dir", dir, "--module", SPARES_MODULE], io);
+  const text = plain(io.text);
+
+  assert.equal(code, 0, text);
+  assert.match(text, /the spares\s+held/);
+  assert.match(
+    text,
+    /together: all 2 spare answers dropped at once, and the run still arrived at the recorded answer/,
+  );
 });

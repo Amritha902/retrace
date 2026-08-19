@@ -7,6 +7,7 @@ import {
   type AblationBaseline,
   type AblationControl,
   type AblationReport,
+  type AblationTogether,
   type AblationTrial,
 } from "./ablate.ts";
 import { orderFacets } from "./agent.ts";
@@ -101,6 +102,11 @@ Options
                             reproduces from there at all, so without it a trial
                             cannot tell its drop from the model moving on its
                             own — which is half the cost and the whole claim
+  --no-together             skip the one fork ablate makes with every spare
+                            answer dropped at once. That fork is what says
+                            whether the spares are spare together, since two
+                            calls covering for one another are each droppable
+                            and jointly needed
   --repeat <n>              cut each of search's fork points, each of sweep's
                             arms, or each of ablate's drops, n times instead of
                             once (default 1). A fork point holds only if every
@@ -182,6 +188,7 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
   const maxForks = readCount(takeOption(args, "--max-forks"), "--max-forks");
   const repeat = readCount(takeOption(args, "--repeat"), "--repeat");
   const noBaseline = takeFlag(args, "--no-baseline");
+  const noTogether = takeFlag(args, "--no-together");
   const allowIrreversible = takeFlag(args, "--allow-irreversible");
   const reentry: Reentry = { overrides, onDivergence, allowIrreversible };
 
@@ -221,6 +228,7 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
         instead,
         maxForks,
         baseline: !noBaseline,
+        together: !noTogether,
         repeat,
       });
     case "resume":
@@ -1371,6 +1379,7 @@ async function cmdAblate(
     instead: string | undefined;
     maxForks: number | undefined;
     baseline: boolean;
+    together: boolean;
     repeat: number | undefined;
   },
 ): Promise<number> {
@@ -1405,6 +1414,7 @@ async function cmdAblate(
     budget: mod.budget,
     store,
     baseline: narrow.baseline,
+    together: narrow.together,
     ...(narrow.only.length > 0 ? { only: narrow.only } : {}),
     ...(narrow.instead === undefined ? {} : { instead: narrow.instead }),
     ...(narrow.maxForks === undefined ? {} : { maxForks: narrow.maxForks }),
@@ -1424,6 +1434,7 @@ async function cmdAblate(
       }
       printAblation(io, trial, width, cuts);
     },
+    onTogether: (made) => printTogether(io, made, width, cuts),
   });
 
   const tried = report.trials.length;
@@ -1444,11 +1455,12 @@ async function cmdAblate(
     );
   }
   if (report.trials.some((t) => t.instability === "cut")) io.out(`${ablationDriftLine(report)}\n`);
+  if (report.together !== undefined) io.out(`${ablationTogetherLine(report.together)}\n`);
   if (report.stopped !== undefined) io.out(dim(`${report.stopped}\n`));
   io.out(`${ablationControlLine(report.control, runId)}\n`);
   io.out(
     dim(
-      `${plural(report.control.forks + report.control.baselines, "fork")} · ` +
+      `${plural(report.control.forks + report.control.baselines + report.control.together, "fork")} · ` +
         `${formatUsd(report.billedUsd)} billed · ` +
         `${formatUsd(report.savedUsd)} not spent again out of ${formatUsd(report.costUsd)}\n`,
     ),
@@ -1456,7 +1468,62 @@ async function cmdAblate(
   const answered = report.trials.every(
     (t) => t.verdict !== "inconclusive" && t.verdict !== "unstable",
   );
-  return report.control.ok && answered ? 0 : 1;
+  // A `covered` is non-zero along with the two that measured nothing, and for
+  // the same reason: the count printed above it is a claim about the set, and
+  // that is the claim the joint drop just refused.
+  const composes = report.together === undefined || report.together.verdict === "held";
+  return report.control.ok && answered && composes ? 0 : 1;
+}
+
+/** Every spare answer taken away at once, and what the run said without them. */
+function printTogether(io: Io, together: AblationTogether, width: number, cuts: number): void {
+  const paint =
+    together.verdict === "covered" ? cyan : together.verdict === "held" ? dim : yellow;
+  const label =
+    together.verdict === "inconclusive" ? statusLabel(together.status) : paint(together.verdict);
+  const stale = together.staleFacets.length > 0 ? dim(`  ${together.staleFacets.join(", ")}`) : "";
+  const indent = `  ${" ".repeat(width)}  `;
+  const tally = cuts > 1 ? dim(` ${together.alike} of ${together.runs.length}`) : "";
+
+  io.out(
+    `\n  ${"the spares".padEnd(width)}  ${padLabel(label, 8)}${tally} ` +
+      dim(`${formatUsd(together.billedUsd)} billed · ${formatUsd(together.savedUsd)} free`) +
+      `${stale}\n`,
+  );
+  io.out(`${indent}${dim(`dropped ${together.keys.join(", ")} at once`)}\n`);
+  io.out(`${indent}${dim(together.runId)}\n`);
+  io.out(`${indent}${truncate(together.error ?? together.output, 68)}\n`);
+  for (const other of otherAnswers(together.runs)) {
+    io.out(`${indent}${dim(`also: ${truncate(other, 62)}`)}\n`);
+  }
+}
+
+/**
+ * Whether the spares above it are spare together — the one thing a column of
+ * one-at-a-time verdicts does not say, and the reading a person takes off it.
+ */
+function ablationTogetherLine(together: AblationTogether): string {
+  const n = together.keys.length;
+  if (together.verdict === "held") {
+    return dim(
+      `together: all ${n} spare answers dropped at once, and the run still arrived at the ` +
+        `recorded answer`,
+    );
+  }
+  if (together.verdict === "covered") {
+    return (
+      `${cyan("covered")}: the ${n} spare answers above are not spare together\n` +
+      dim(
+        `  dropped at once the run answered something else, so at least one of them is ` +
+          `carrying the\n  conclusion and each reads as spare only while the others stand`,
+      )
+    );
+  }
+  return (
+    `${yellow("together: unsettled")}: dropping all ${n} spare answers at once ` +
+    `${together.verdict === "inconclusive" ? "did not finish" : "did not answer one way"}\n` +
+    dim(`  so whether they are spare together is not something this ablation found out\n`)
+  );
 }
 
 /**
@@ -1539,6 +1606,13 @@ function ablationControlLine(control: AblationControl, runId: string): string {
       ? ""
       : `, and ${plural(control.baselines, "baseline")} replayed the same prefixes whole ` +
         `— ${plural(control.baselineClaimed, "effect")} more`;
+  // The joint drop is held the same way and counted apart from the trials,
+  // because it took several values away rather than one.
+  const jointly =
+    control.together === 0
+      ? ""
+      : `, and ${plural(control.together, "fork")} replayed it with every spare dropped ` +
+        `— ${plural(control.togetherClaimed, "effect")} more`;
   // Said separately from the prefix, because it is the half above the cut: the
   // steps that ran live still read the recorded run's world wherever they asked
   // it something it already held.
@@ -1550,7 +1624,7 @@ function ablationControlLine(control: AblationControl, runId: string): string {
   return (
     green("controlled") +
     `: each of ${plural(control.forks, "fork")} replayed ${runId}'s prefix unchanged ` +
-    `except the one value it dropped — ${plural(control.claimed, "effect")} in all${alongside}${world}`
+    `except the one value it dropped — ${plural(control.claimed, "effect")} in all${alongside}${jointly}${world}`
   );
 }
 
