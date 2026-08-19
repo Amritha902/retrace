@@ -26,6 +26,12 @@ import {
   resetWobble,
   tools as steady,
 } from "./fixtures/ablate-wobble-module.ts";
+import {
+  provider as readingProvider,
+  readCount,
+  resetReads,
+  tools as readingTools,
+} from "./fixtures/reading-module.ts";
 import { tools as movingTools } from "./fixtures/moving-module.ts";
 
 const MODULE = fileURLToPath(new URL("./fixtures/ablate-module.ts", import.meta.url));
@@ -810,6 +816,37 @@ test("retrace ablate --repeat says which drop the run has two answers to", async
   // Six drops and six re-entries with nothing dropped: the price of asking twice.
   assert.match(text, /reproduced: 6 forks re-entered the run at the same cuts/);
   assert.match(text, /12 forks · \$/);
+});
+
+test("a trial's live tail reads the run's own world, and the control says how much of it", async () => {
+  const store = new MemoryStore();
+  resetReads();
+  await run("explain alpha and beta", {
+    agent,
+    provider: readingProvider,
+    tools: readingTools,
+    store,
+    runId: "reading",
+  });
+  const recorded = readCount();
+
+  const report = await ablateRun("reading", {
+    provider: readingProvider,
+    tools: readingTools,
+    store,
+    baseline: false,
+  });
+
+  assert.equal(report.control.ok, true);
+  // Dropping step 0's lookup cuts at step 1, whose lookup then runs live and
+  // asks the corpus what the recorded run asked it. Dropping step 1's cuts
+  // above every tool call, so its tail has nothing to read.
+  assert.equal(report.control.kept, 1);
+  assert.equal(
+    readCount(),
+    recorded,
+    "the trial that re-ran a lookup was answered out of the log, not the corpus",
+  );
 });
 
 test("retrace ablate needs a run and the module its live tails run", async (t: TestContext) => {

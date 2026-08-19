@@ -98,6 +98,12 @@ export interface SweepControl {
   claimed: number;
   /** Effects inside it an arm was told to serve a different value at. */
   excused: number;
+  /**
+   * Reads above the fork point every arm took out of the same log anyway: the
+   * world their live tails ran in, which is the other half of what makes them
+   * comparable. See `KeptWorld`.
+   */
+  kept: number;
   /** Set when two arms disagree somewhere they both replayed. */
   contradiction?: string;
   ok: boolean;

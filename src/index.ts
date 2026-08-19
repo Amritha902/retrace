@@ -42,6 +42,7 @@ export {
   holdSharedPrefix,
   type Asked,
   type EffectPair,
+  type KeptWorld,
   type Kinship,
   type RunComparison,
   type SharedLog,

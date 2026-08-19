@@ -384,6 +384,19 @@ publish contains rather than what changed since something.
   connection lives and `lineage` is what walks them. An override excuses the
   position it substituted and not the ones after it, which still came out of the
   log unchanged.
+- **The world above the prefix, held the same way.** A fork's positional
+  sequence is cut at the fork point; its key table is not, so a live step asking
+  for the clock, an id, a `ctx.fetch` or a `ctx.read` at a slot the shared log
+  already holds is served out of it rather than off the world. `compareRuns`
+  carries a `world` beside `claimed`, and `retrace diff` prints it as a line of
+  its own: a child holds whatever its parent's key table offered it, and two
+  siblings hold every key they both reached. A key only one of them reached is
+  held to nothing, and a substituted value is excused there as it is below the
+  fork point. This is what makes the `controlled` line of a sweep, a search and
+  an ablation a claim about the steps those runs *paid* for — they executed
+  their tools for real and were answered out of the recorded run's log wherever
+  they asked it what it had already been asked — and it is checkable with the
+  run they came from gone, which is the case `verify` reports skipped.
 - **Why two runs parted, not only where.** Every pair `compareRuns` lines up
   carries an `asked`, and `retrace diff` prints it as a line of its own: whether
   the two runs were asking the same thing at the position they answered

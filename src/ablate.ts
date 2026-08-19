@@ -163,6 +163,13 @@ export interface AblationControl {
   /** Positions inside those a fork was told to drop: one apiece. */
   excused: number;
   /**
+   * Reads above each trial's cut that it took out of the run's own key table
+   * rather than the world, over all of them. The tight cut makes the prefix
+   * free; this is what keeps the live tail above it a counterfactual rather
+   * than a second visit to the world. See `KeptWorld`.
+   */
+  kept: number;
+  /**
    * Baseline forks held the same way, and the effects they replayed. They cut
    * where the trials cut and substitute nothing, so every position they
    * replayed is owed to the run unexcused.
@@ -353,6 +360,7 @@ export async function ablateRun(
   }
 
   let claimedByTrials = 0;
+  let keptByTrials = 0;
   let claimedByBaselines = 0;
   for (const made of baselines) claimedByBaselines += made.claimed * made.runs.length;
 
@@ -375,6 +383,7 @@ export async function ablateRun(
       contradiction ??= held.contradiction;
       excused += held.excused;
       claimedByTrials += held.claimed;
+      keptByTrials += held.world.held.length;
       claimed = held.claimed;
       if (cut === 0) facets = staleFacets(result.events);
       runs.push(runOf(result));
@@ -425,6 +434,7 @@ export async function ablateRun(
       forks: trials.length * repeat,
       claimed: claimedByTrials,
       excused,
+      kept: keptByTrials,
       baselines: baselines.length * repeat,
       baselineClaimed: claimedByBaselines,
       ...(contradiction === undefined ? {} : { contradiction }),

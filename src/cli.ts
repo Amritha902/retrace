@@ -490,6 +490,7 @@ function cmdDiff(io: Io, store: RunStore, a: string | undefined, b: string | und
   }
 
   io.out(`\n${dim("free")}      ${freeLine(cmp)}\n`);
+  if (cmp.world.held.length > 0) io.out(`${dim("world")}     ${worldLine(cmp)}\n`);
   io.out(
     `${dim("diverges")}  ` +
       (cmp.divergedAt === -1
@@ -535,6 +536,22 @@ function freeLine(cmp: RunComparison): string {
   return cmp.excused === 0
     ? `${green(held)}${dim(", value for value")}`
     : `${green(held)}${dim(`: ${cmp.claimed - cmp.excused} value for value, ${cmp.excused} substituted on purpose`)}`;
+}
+
+/**
+ * The reads their live tails took out of the same log rather than the world.
+ *
+ * The `free` line above stops at the fork point, because the positional
+ * sequence does. The key table does not, and this is the half of the claim that
+ * lives above it: a live step that asked the clock, an id or a corpus at a slot
+ * the shared log already holds was answered out of it.
+ */
+function worldLine(cmp: RunComparison): string {
+  const held = `${plural(cmp.world.held.length, "read")} above it, out of the same log`;
+  if (!cmp.ok) return red(held);
+  return cmp.world.excused.length === 0
+    ? `${green(held)}${dim(", value for value")}`
+    : `${green(held)}${dim(`: ${cmp.world.held.length - cmp.world.excused.length} value for value, ${cmp.world.excused.length} substituted on purpose`)}`;
 }
 
 /**
@@ -1107,11 +1124,14 @@ async function cmdSearch(
     // in with the fork points that did would understate what was checked.
     const held = controlled.reduce((sum, c) => sum + c.claimed, 0);
     const substituted = controlled.reduce((sum, c) => sum + c.excused, 0);
+    const kept = controlled.reduce((sum, c) => sum + c.kept, 0);
     io.out(
       dim(
         `controlled: ${plural(held, "effect")} replayed identically by the ` +
           `${report.repeat} forks of each fork point` +
-          `${substituted === 0 ? "" : `, ${substituted} of them a value they were told to substitute`}\n`,
+          `${substituted === 0 ? "" : `, ${substituted} of them a value they were told to substitute`}` +
+          keptClause(kept) +
+          `\n`,
       ),
     );
   }
@@ -1314,8 +1334,25 @@ function controlLine(control: SweepControl): string {
       : `all ${plural(control.runs, "fork")} of the ${plural(control.arms, "arm")}`;
   return (
     green("controlled") +
-    `: ${plural(control.claimed, "effect")} replayed identically by ${by}${substituted}`
+    `: ${plural(control.claimed, "effect")} replayed identically by ${by}${substituted}` +
+    keptClause(control.kept)
   );
+}
+
+/**
+ * What the live tails above the fork point read out of the same log.
+ *
+ * The count beside it is about the prefix, which every arm replayed and none of
+ * them executed. This is the other half: the steps that *did* execute were
+ * answered out of the recorded run's key table wherever they asked it something
+ * it already held, which is what makes them a set of counterfactuals rather
+ * than a set of visits to a world that has moved since. Omitted at zero, since
+ * a run whose tools read nothing has nothing here to claim.
+ */
+function keptClause(kept: number): string {
+  return kept === 0
+    ? ""
+    : `, and ${plural(kept, "read")} their live tails took out of the same log`;
 }
 
 /**
@@ -1502,10 +1539,18 @@ function ablationControlLine(control: AblationControl, runId: string): string {
       ? ""
       : `, and ${plural(control.baselines, "baseline")} replayed the same prefixes whole ` +
         `— ${plural(control.baselineClaimed, "effect")} more`;
+  // Said separately from the prefix, because it is the half above the cut: the
+  // steps that ran live still read the recorded run's world wherever they asked
+  // it something it already held.
+  const world =
+    control.kept === 0
+      ? ""
+      : `; their live tails read ${plural(control.kept, "value")} out of ${runId}'s own log ` +
+        `rather than the world`;
   return (
     green("controlled") +
     `: each of ${plural(control.forks, "fork")} replayed ${runId}'s prefix unchanged ` +
-    `except the one value it dropped — ${plural(control.claimed, "effect")} in all${alongside}`
+    `except the one value it dropped — ${plural(control.claimed, "effect")} in all${alongside}${world}`
   );
 }
 

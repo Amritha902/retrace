@@ -711,6 +711,22 @@ in nothing underneath it. The one exception is on record too — an arm that
 substituted a value is *meant* to differ there, so those positions are counted
 and named rather than quietly passed.
 
+Where the arms' tools read the world, the line carries a second count — the
+reads their *live* tails were served out of that same log, above the fork point
+where the prefix claim stops:
+
+```
+controlled: 4 effects replayed identically by all 4 forks of the 2 arms, and 1
+read their live tails took out of the same log
+```
+
+That is the half of the claim that is about the steps the arms paid for. They
+executed their tools for real and were handed the recorded run's answers
+wherever they asked it what it had already been asked, so a corpus that moved
+since is not something a difference between two arms can be. It is
+[the `world` line of a `diff`](#checking-two-logs-against-each-other) summed
+over the set, and it is absent rather than zero when a run's tools read nothing.
+
 The column beside the money is each arm saying what its own change moved:
 `system` for a rewritten prompt, `conversation` for a rewritten world. It is the
 same [staleness](#what-a-replayed-step-is-still-answering) a fork reports,
@@ -1827,6 +1843,46 @@ demo-counterfactual both replayed it from demo-original — two runs cannot have
 taken different values out of the same log
 ```
 
+`free` stops at the fork point, because the positional sequence does. The key
+table does not: a live tail asking for [the clock, an id, a fetch or a
+read](#time-ids-and-randomness) at a slot the parent already filled is served
+the parent's answer, wherever in the run it reaches it. So above the prefix
+there is a second thing two logs owe each other, and `world` is it:
+
+```
+$ retrace diff lookup-forked lookup-counterfactual
+
+free      4 effects both replayed from lookup-original, value for value
+world     1 read above it, out of the same log, value for value
+```
+
+That line is the claim that makes a fork a controlled experiment rather than a
+second run, and it used to be asserted rather than checked. Both of those live
+tails executed their tools for real; both were handed `lookup-original`'s
+answers wherever they asked it something it had already been asked, so a
+difference between the two runs is a difference between the two changes and not
+between two visits to a corpus that has moved since. A read only one of them
+made is held to nothing — a question only one of them asked has no second answer
+to disagree with — and a value one of them was told to substitute is excused
+here exactly as it is below the fork point.
+
+Doctor one of *those* and it is caught by the same rule, one line up:
+
+```
+contradicted: read:step:1#0:lookup/read:0:corpus:1bbe835a4f7a differs, and
+lookup-forked and lookup-counterfactual both served it from lookup-original's
+key table above the prefix they replayed — two live tails cannot have read
+different values out of the same log
+```
+
+`verify` has held a fork's live tail to its parent this way all along, because
+every value it served out of a log has to be a value that log holds. What no
+check could do until now is hold two forks to *each other* up there with the run
+they came from gone — which is the case this whole command exists for. It is
+also what the `controlled` line of a [sweep](#several-changes-at-one-point), a
+[search](#one-fork-is-one-draw) and an [ablation](#which-answers-the-answer-needed)
+now counts beside the prefix: the arms shared a world as well as a log.
+
 That is the whole of what it exits non-zero on. Two runs with no relation
 between them owe each other nothing, and it says so rather than inventing a
 claim to fail; so does a fork at step 0, which replayed nothing. Only the direct
@@ -2122,6 +2178,19 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   moved, and a question that did not is a divergence your fork did not cause.
   Neither is a failure. The second one is the honest reading of a model with a
   temperature, and it is not something either log alone could offer.
+- **A fork's live tail is held to the world it inherited, not only to the prefix
+  it replayed.** The positional sequence is cut at the fork point; the key table
+  is not, so a live step asking for the clock, an id, a `ctx.fetch` or a
+  `ctx.read` at a slot the shared log already holds is served out of it. Those
+  effects sit above `free`, which is where the positional claim stops, and
+  `world` is the claim over them: a child holds whatever its parent's key table
+  offered it, and two siblings hold every key they *both* reached. It says
+  nothing about a read only one of them made — a question one of them asked and
+  the other did not has no second answer to disagree with — and nothing about
+  whether the recorded answer is still true, which is `recheck`'s question. What
+  it does buy is the sentence a sweep, a search and an ablation all rest on: the
+  arms ran in one world, and a corpus that moved since is not something a
+  difference between them can be about.
 - **`tree` describes a store, not a lineage.** It arranges the runs a store
   holds by what was forked, resumed or replayed from what, and takes what each
   one was asking from that run's own log: the fork point it recorded, the
@@ -2221,8 +2290,8 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 ## Status
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
-one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads — what it asked, body and all, and what came back — inside the boundary, the `ctx.read` that does the same for the database queries, subprocesses and native clients no wrapper can intercept, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log, the `reads` check that holds every journaled read to the call that made it and to the question its own slot is a digest of, and the `conclusion` check that holds a run's reported answer and ending to the response its log ends on, the `diff` comparison that holds two logs to the prefix they claim from the same source and says whether the two runs were asking the same thing where they parted, and the `recheck` re-execution including its `unstable` finding, the watch on the
-ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, the `tree` view that draws a store as the family of runs it actually is, the `search` walk that forks downward until a change takes and reports the cheapest fork point it did, its `--repeat` that cuts each fork point several times so a model that moved the answer on its own comes back `unstable` rather than as a finding, the `sweep` that tries several changes at one fork point off one replayed prefix and holds the arms to the prefix they shared, its `--repeat` that cuts each arm several times so an arm whose answer moved on its own comes back `unstable` rather than as a difference between it and the arms beside it, and the `ablate` that drops each recorded answer in turn to say which of them the run's conclusion needed, re-entering each of its cuts with nothing dropped so a run that does not reproduce from one comes back `unstable` rather than as a dependency, and its `--repeat` that makes each drop several times so a run with two answers to one gap comes back `unstable` rather than as a call it did or did not need — is covered by 532 tests that run without network access — including a seeded property check that generates dozens of run shapes and holds each of them to the two guarantees the runtime rests on: a replay reproduces the log effect for effect and executes nothing, and a pure-tools fork at every step reproduces its parent. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads — what it asked, body and all, and what came back — inside the boundary, the `ctx.read` that does the same for the database queries, subprocesses and native clients no wrapper can intercept, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log, the `reads` check that holds every journaled read to the call that made it and to the question its own slot is a digest of, and the `conclusion` check that holds a run's reported answer and ending to the response its log ends on, the `diff` comparison that holds two logs to the prefix they claim from the same source, to the world their live tails took out of it above that prefix, and says whether the two runs were asking the same thing where they parted, and the `recheck` re-execution including its `unstable` finding, the watch on the
+ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, the `tree` view that draws a store as the family of runs it actually is, the `search` walk that forks downward until a change takes and reports the cheapest fork point it did, its `--repeat` that cuts each fork point several times so a model that moved the answer on its own comes back `unstable` rather than as a finding, the `sweep` that tries several changes at one fork point off one replayed prefix and holds the arms to the prefix they shared, its `--repeat` that cuts each arm several times so an arm whose answer moved on its own comes back `unstable` rather than as a difference between it and the arms beside it, and the `ablate` that drops each recorded answer in turn to say which of them the run's conclusion needed, re-entering each of its cuts with nothing dropped so a run that does not reproduce from one comes back `unstable` rather than as a dependency, and its `--repeat` that makes each drop several times so a run with two answers to one gap comes back `unstable` rather than as a call it did or did not need — is covered by 542 tests that run without network access — including a seeded property check that generates dozens of run shapes and holds each of them to the two guarantees the runtime rests on: a replay reproduces the log effect for effect and executes nothing, and a pure-tools fork at every step reproduces its parent. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -2230,7 +2299,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 532 tests, no network, no API key
+npm test           # 542 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

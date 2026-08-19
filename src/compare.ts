@@ -1,4 +1,5 @@
 import { orderFacets } from "./agent.ts";
+import { DETERMINISTIC_KINDS } from "./journal.ts";
 import { effectsOf, summarize, type RunSummary } from "./replay.ts";
 import { fingerprint, RunStore } from "./store.ts";
 import type { ForkOrigin, RetraceEvent } from "./types.ts";
@@ -71,6 +72,28 @@ export interface EffectPair {
   asked?: Asked;
 }
 
+/**
+ * What two logs took out of the same log *above* the prefix they replayed.
+ *
+ * The positional sequence is cut at the fork point, but the key table is not:
+ * a live tail that reads the clock, an id, the network or a source at a slot
+ * its parent filled is served the parent's answer. That is the whole reason a
+ * fork is a controlled experiment rather than a second run — it runs in the
+ * world its parent ran in — and it is a claim about effects the positional
+ * comparison has already stopped at, so nothing above was holding it.
+ *
+ * Matched by key rather than by position, because that is how it is served.
+ */
+export interface KeptWorld {
+  /**
+   * Keys both logs served out of the same log and hold the same value at, as
+   * `kind:key`. Includes the substituted ones.
+   */
+  held: readonly string[];
+  /** Those of `held` one of the two was told to serve a different value at. */
+  excused: readonly string[];
+}
+
 export interface RunComparison {
   a: RunSummary;
   b: RunSummary;
@@ -91,7 +114,12 @@ export interface RunComparison {
    * the keys are in the fork's own `overrides`.
    */
   excused: number;
-  /** Set when the two disagree inside `claimed`. */
+  /**
+   * The reads above `claimed` that both logs took out of the same log anyway —
+   * the world a live tail inherited rather than went and asked for.
+   */
+  world: KeptWorld;
+  /** Set when the two disagree inside `claimed`, or in `world`. */
   contradiction?: string;
   /** False only on a contradiction. Two runs that merely diverged are the point. */
   ok: boolean;
@@ -160,7 +188,12 @@ export function compareEvents(
   const substituted = (p: EffectPair) => p.a?.overridden === true || p.b?.overridden === true;
   const broken = inside.find((p) => p.verdict !== "same" && !substituted(p));
 
-  const contradiction = broken === undefined ? undefined : explain(broken, kinship, a, b);
+  const world = holdKeptWorld(kinship, left, right, claimed, a, b);
+  // The prefix comes first when both are broken: it is the wider claim, and a
+  // log whose free prefix is not the prefix it came from is not a log whose
+  // live tail is worth reading.
+  const contradiction =
+    broken === undefined ? world.contradiction : explain(broken, kinship, a, b);
 
   return {
     a,
@@ -170,9 +203,113 @@ export function compareEvents(
     divergedAt,
     claimed,
     excused: inside.filter(substituted).length,
+    world: { held: world.held, excused: world.excused },
     ...(contradiction !== undefined ? { contradiction } : {}),
     ok: contradiction === undefined,
   };
+}
+
+/** Kinds a run serves out of a log by key rather than by position. */
+const KEYED: ReadonlySet<string> = new Set(DETERMINISTIC_KINDS);
+
+/** One keyed effect and where it sits in its own log's effect sequence. */
+interface KeyedAt {
+  effect: Effect;
+  position: number;
+}
+
+/** Every keyed value a log took out of another log, by `kind:key`. */
+function keyedReplays(effects: readonly Effect[]): Map<string, KeyedAt> {
+  const out = new Map<string, KeyedAt>();
+  effects.forEach((effect, position) => {
+    if (effect.replayed && KEYED.has(effect.kind)) {
+      out.set(`${effect.kind}:${effect.key}`, { effect, position });
+    }
+  });
+  return out;
+}
+
+/** Every keyed value a log holds at all — what a parent has to offer a child. */
+function keyedValues(effects: readonly Effect[]): Map<string, KeyedAt> {
+  const out = new Map<string, KeyedAt>();
+  effects.forEach((effect, position) => {
+    if (KEYED.has(effect.kind)) out.set(`${effect.kind}:${effect.key}`, { effect, position });
+  });
+  return out;
+}
+
+/**
+ * Hold the two logs to the reads their live tails took out of the same log.
+ *
+ * A child asks its parent's key table, so what it is held to is every keyed
+ * value the parent holds, replayed there or not. Two siblings ask the same
+ * table as each other, so what they are held to is the keys they *both* served
+ * from it — a key only one of them reached is a question only one of them
+ * asked, and there is nothing to compare.
+ */
+function holdKeptWorld(
+  kinship: Kinship,
+  left: readonly Effect[],
+  right: readonly Effect[],
+  claimed: number,
+  a: RunSummary,
+  b: RunSummary,
+): KeptWorld & { contradiction?: string } {
+  switch (kinship.kind) {
+    case "parent": {
+      const [child, parent] = kinship.parent === "a" ? [right, left] : [left, right];
+      const [childId, parentId] =
+        kinship.parent === "a" ? [b.runId, a.runId] : [a.runId, b.runId];
+      return holdByKey(
+        keyedReplays(child),
+        keyedValues(parent),
+        claimed,
+        (key) =>
+          `${key} differs, and ${childId} served it from ${parentId}'s key table above the ` +
+          `prefix it replayed — a live tail that did not run in the world it took its reads from`,
+      );
+    }
+    case "siblings":
+      return holdByKey(
+        keyedReplays(left),
+        keyedReplays(right),
+        claimed,
+        (key) =>
+          `${key} differs, and ${a.runId} and ${b.runId} both served it from ${kinship.origin}'s ` +
+          `key table above the prefix they replayed — two live tails cannot have read different ` +
+          `values out of the same log`,
+      );
+    // "same" has already held every position, and "unrelated" is two logs with
+    // no shared table to have read anything out of.
+    default:
+      return { held: [], excused: [] };
+  }
+}
+
+function holdByKey(
+  mine: ReadonlyMap<string, KeyedAt>,
+  theirs: ReadonlyMap<string, KeyedAt>,
+  claimed: number,
+  explainKey: (key: string) => string,
+): KeptWorld & { contradiction?: string } {
+  const held: string[] = [];
+  const excused: string[] = [];
+  let contradiction: string | undefined;
+  for (const [key, at] of mine) {
+    const other = theirs.get(key);
+    if (other === undefined) continue;
+    // Both inside the prefix is a position the positional comparison already
+    // held; counting it here would say the live tails shared something they did
+    // not reach.
+    if (at.position < claimed && other.position < claimed) continue;
+    held.push(key);
+    if (at.effect.overridden === true || other.effect.overridden === true) {
+      excused.push(key);
+      continue;
+    }
+    if (outcomeOf(at.effect) !== outcomeOf(other.effect)) contradiction ??= explainKey(key);
+  }
+  return { held, excused, ...(contradiction === undefined ? {} : { contradiction }) };
 }
 
 /**
@@ -331,6 +468,13 @@ export interface SharedPrefix {
   claimed: number;
   /** Effects inside it a run was told to serve a different value at. */
   excused: number;
+  /**
+   * Reads above that prefix every one of them took out of the same log: the
+   * world their live tails inherited rather than went and asked for. See
+   * `KeptWorld` — over a set it is the keys all of them reached, since one only
+   * some of them asked says nothing about the rest.
+   */
+  kept: number;
   /** Set when two of them disagree somewhere they both replayed. */
   contradiction?: string;
   ok: boolean;
@@ -345,14 +489,23 @@ export interface SharedPrefix {
 export function holdSharedPrefix(logs: readonly SharedLog[]): SharedPrefix {
   const first = logs[0];
   if (first === undefined || logs.length < 2) {
-    return { runs: logs.length, claimed: 0, excused: 0, ok: true };
+    return { runs: logs.length, claimed: 0, excused: 0, kept: 0, ok: true };
   }
 
   let claimed = Number.POSITIVE_INFINITY;
+  let kept: Set<string> | undefined;
   let contradiction: string | undefined;
   for (const other of logs.slice(1)) {
     const seen = compareEvents(first.runId, first.events, other.runId, other.events);
     claimed = Math.min(claimed, seen.claimed);
+    // Intersected rather than summed or minimised: what the set shares is the
+    // keys every pair shares, and a key two of them reached is not a world the
+    // third ran in.
+    const shared = kept;
+    kept =
+      shared === undefined
+        ? new Set(seen.world.held)
+        : new Set(seen.world.held.filter((key) => shared.has(key)));
     contradiction ??= seen.contradiction;
   }
 
@@ -370,6 +523,7 @@ export function holdSharedPrefix(logs: readonly SharedLog[]): SharedPrefix {
     runs: logs.length,
     claimed,
     excused: substituted.size,
+    kept: kept?.size ?? 0,
     ...(contradiction === undefined ? {} : { contradiction }),
     ok: contradiction === undefined,
   };

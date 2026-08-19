@@ -9,6 +9,7 @@ import {
   compareRuns,
   defineAgent,
   fork,
+  holdSharedPrefix,
   MemoryStore,
   MockProvider,
   objectSchema,
@@ -523,6 +524,226 @@ function stubFetch(answer: () => Response) {
     },
   };
 }
+
+/**
+ * A tool that takes its answer from `ctx.read`, and a counter behind it that
+ * moves every time the corpus is actually asked. A value that came out of the
+ * log and one that came out of the corpus are then different on sight.
+ */
+function reading() {
+  let asked = 0;
+  return {
+    asked: () => asked,
+    tool: tool({
+      name: "lookup",
+      description: "Look a term up. Call this when you need a fact you don't have.",
+      inputSchema: objectSchema({ term: { type: "string" } }),
+      run: async (input: { term: string }, ctx) =>
+        String(await ctx.read("corpus", input, () => `answer ${++asked}`)),
+    }),
+  };
+}
+
+/**
+ * A run whose two lookups each read the corpus, so its log holds two keyed
+ * reads a live tail can ask for again.
+ */
+async function recordReading(store: MemoryStore | RunStore, reads: ReturnType<typeof reading>) {
+  return run("explain alpha and beta", {
+    agent,
+    provider: new MockProvider(script()),
+    tools: [reads.tool],
+    store,
+    runId: "reading",
+  });
+}
+
+/**
+ * A fork whose live tail repeats step 1's lookup — the same question, so the
+ * read inside it lands in the slot the parent already filled.
+ */
+async function forkAsking(
+  store: MemoryStore | RunStore,
+  reads: ReturnType<typeof reading>,
+  runId: string,
+  { term = "beta", answer = runId, atStep = 1, overrides = {} } = {},
+) {
+  return fork("reading", {
+    provider: new MockProvider([
+      { content: [toolUse("t2", "lookup", { term })] },
+      { content: [text(answer)] },
+    ]),
+    tools: [reads.tool],
+    atStep,
+    overrides,
+    store,
+    runId,
+  });
+}
+
+/** The key of the read step 1's lookup made, as the log records it. */
+function readKey(store: MemoryStore | RunStore, runId = "reading"): string {
+  const found = store
+    .read(runId)
+    .find((e) => e.type === "effect" && e.kind === "read" && e.key.startsWith("step:1"));
+  assert.ok(found?.type === "effect", "the reading run recorded no read in step 1");
+  return found.key;
+}
+
+test("two live tails off one run are held to the reads they took out of it", async () => {
+  const store = new MemoryStore();
+  const reads = reading();
+  await recordReading(store, reads);
+  await forkAsking(store, reads, "arm-a");
+  await forkAsking(store, reads, "arm-b");
+  assert.equal(reads.asked(), 2, "the two live tails were answered out of the log, not the corpus");
+
+  const cmp = compareRuns("arm-a", "arm-b", store);
+
+  assert.deepEqual(cmp.kinship, { kind: "siblings", origin: "reading" });
+  // Three effects below the fork point, and the read their live tails made
+  // above it — which the positional claim stops short of by construction.
+  assert.equal(cmp.claimed, 3);
+  assert.deepEqual(cmp.world.held, [`read:${readKey(store)}`]);
+  assert.deepEqual(cmp.world.excused, []);
+  assert.equal(cmp.ok, true);
+});
+
+test("a live tail holding a value its sibling's did not is a contradiction, not a divergence", async () => {
+  const store = new MemoryStore();
+  const reads = reading();
+  await recordReading(store, reads);
+  await forkAsking(store, reads, "arm-a");
+  await forkAsking(store, reads, "arm-b");
+
+  const doctored = tampered(
+    store.read("arm-b"),
+    (e) => e.type === "effect" && e.key === readKey(store),
+    (e) => {
+      if (e.type === "effect") e.value = { ...(e.value as object), value: "another corpus" };
+    },
+  );
+
+  const cmp = compareEvents("arm-a", store.read("arm-a"), "arm-b", doctored);
+
+  assert.equal(cmp.ok, false);
+  assert.match(cmp.contradiction ?? "", /two live tails cannot have read different values/);
+  // Above the fork point, so the prefix claim has nothing to say about it.
+  assert.equal(cmp.claimed, 3);
+});
+
+test("a fork's live tail is held to the key table its parent handed it", async () => {
+  const store = new MemoryStore();
+  const reads = reading();
+  await recordReading(store, reads);
+  await forkAsking(store, reads, "arm-a");
+
+  const cmp = compareRuns("reading", "arm-a", store);
+
+  assert.equal(cmp.kinship.kind, "parent");
+  assert.deepEqual(cmp.world.held, [`read:${readKey(store)}`]);
+  assert.equal(cmp.ok, true);
+
+  const doctored = tampered(
+    store.read("arm-a"),
+    (e) => e.type === "effect" && e.key === readKey(store),
+    (e) => {
+      if (e.type === "effect") e.value = { ...(e.value as object), value: "another corpus" };
+    },
+  );
+  const broken = compareEvents("reading", store.read("reading"), "arm-a", doctored);
+
+  assert.equal(broken.ok, false);
+  assert.match(broken.contradiction ?? "", /did not run in the world it took its reads from/);
+});
+
+test("a question only one live tail asked is not a world the other ran in", async () => {
+  const store = new MemoryStore();
+  const reads = reading();
+  await recordReading(store, reads);
+  await forkAsking(store, reads, "arm-a");
+  await forkAsking(store, reads, "arm-c", { term: "gamma" });
+  assert.equal(reads.asked(), 3, "asking the corpus something new reaches the corpus");
+
+  const cmp = compareRuns("arm-a", "arm-c", store);
+
+  assert.deepEqual(cmp.world.held, [], "one of them read the corpus rather than the log");
+  assert.equal(cmp.ok, true);
+});
+
+test("a read inside the prefix both of them replayed is held there and not counted twice", async () => {
+  const store = new MemoryStore();
+  const reads = reading();
+  await recordReading(store, reads);
+  await forkAsking(store, reads, "deep-a", { atStep: 2 });
+  await forkAsking(store, reads, "deep-b", { atStep: 2 });
+
+  const cmp = compareRuns("deep-a", "deep-b", store);
+
+  assert.equal(cmp.claimed, 6, "both forks replayed step 1's read positionally");
+  assert.deepEqual(cmp.world.held, []);
+});
+
+test("a value one live tail was told to substitute is excused rather than counted against it", async () => {
+  const store = new MemoryStore();
+  const reads = reading();
+  await recordReading(store, reads);
+  const key = readKey(store);
+  // A read is made by a tool, so the substitution only reaches one if the tool
+  // executes — which means cutting inside the step rather than above it.
+  for (const [runId, overrides] of [
+    ["plain", {}],
+    ["swapped", { [key]: "the corpus said nothing" }],
+  ] as const) {
+    await fork("reading", {
+      provider: new MockProvider([{ content: [text(runId)] }]),
+      tools: [reads.tool],
+      atEffect: "step:1#0:lookup",
+      overrides,
+      store,
+      runId,
+    });
+  }
+
+  const cmp = compareRuns("plain", "swapped", store);
+
+  assert.deepEqual(cmp.world.held, [`read:${key}`]);
+  assert.deepEqual(cmp.world.excused, [`read:${key}`]);
+  assert.equal(cmp.ok, true, "the two were meant to differ exactly there");
+});
+
+test("a set of live tails shares the reads every one of them made, not the ones some did", async () => {
+  const store = new MemoryStore();
+  const reads = reading();
+  await recordReading(store, reads);
+  for (const runId of ["arm-a", "arm-b"]) await forkAsking(store, reads, runId);
+  await forkAsking(store, reads, "arm-c", { term: "gamma" });
+
+  const logs = (...ids: string[]) => ids.map((runId) => ({ runId, events: store.read(runId) }));
+
+  assert.equal(holdSharedPrefix(logs("arm-a", "arm-b")).kept, 1);
+  assert.equal(
+    holdSharedPrefix(logs("arm-a", "arm-b", "arm-c")).kept,
+    0,
+    "the arm that asked something else read the corpus, so the set shares nothing above the cut",
+  );
+});
+
+test("diff says what the two live tails read out of the same log", async (t) => {
+  const dir = tempDir(t);
+  const store = new RunStore(dir);
+  const reads = reading();
+  await recordReading(store, reads);
+  await forkAsking(store, reads, "arm-a");
+  await forkAsking(store, reads, "arm-b");
+  const io = capture();
+
+  const code = await main(["diff", "arm-a", "arm-b", "--dir", dir], io);
+
+  assert.equal(code, 0, io.errors());
+  assert.match(io.text(), /free\s+3 effects both replayed from reading, value for value/);
+  assert.match(io.text(), /world\s+1 read above it, out of the same log, value for value/);
+});
 
 test("diff without two run ids says so instead of guessing", async (t) => {
   const io = capture();

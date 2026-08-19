@@ -20,6 +20,12 @@ import {
 } from "../src/index.ts";
 import { arms, provider, tools } from "./fixtures/sweep-module.ts";
 import {
+  provider as readingProvider,
+  readCount,
+  resetReads,
+  tools as readingTools,
+} from "./fixtures/reading-module.ts";
+import {
   arms as wobbleArms,
   provider as wobbleProvider,
   resetWobble,
@@ -28,6 +34,7 @@ import {
 
 const MODULE = fileURLToPath(new URL("./fixtures/sweep-module.ts", import.meta.url));
 const WOBBLE = fileURLToPath(new URL("./fixtures/sweep-wobble-module.ts", import.meta.url));
+const READING = fileURLToPath(new URL("./fixtures/reading-module.ts", import.meta.url));
 
 const agent = defineAgent({
   name: "researcher",
@@ -562,6 +569,38 @@ test("the CLI names the arm that did not settle, says what else it said, and exi
   assert.match(text, /unstable: "wobbly" answered more than one way at this fork point/);
   assert.match(text, /a\s+difference between it and another arm is not something the arms account for/);
   assert.match(text, /controlled: 4 effects replayed identically by all 6 forks of the 2 arms/);
+});
+
+test("the arms share the world above the fork point as well as the prefix below it", async (t) => {
+  const dir = tempDir(t);
+  resetReads();
+  await run("explain alpha and beta", {
+    agent,
+    provider: readingProvider,
+    tools: readingTools,
+    store: new RunStore(dir),
+    runId: "baseline",
+  });
+  const recorded = readCount();
+  const io = capture();
+
+  // Step 1, not 2: the live tail of each arm has a lookup in it, so the arms
+  // execute a tool above the fork point rather than only answering.
+  const code = await main(
+    ["sweep", "baseline", "--at", "1", "--dir", dir, "--module", READING, "--repeat", "2"],
+    io,
+  );
+
+  assert.equal(code, 0, io.text());
+  assert.match(
+    io.text(),
+    /controlled: 3 effects replayed identically by all 4 forks of the 2 arms, and 1 read their live tails took out of the same log/,
+  );
+  assert.equal(
+    readCount(),
+    recorded,
+    "the live lookups ran; what they did not do is ask the corpus again",
+  );
 });
 
 function tempDir(t: TestContext): string {
