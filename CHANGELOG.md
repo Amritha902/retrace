@@ -117,6 +117,20 @@ publish contains rather than what changed since something.
   trials are, and are counted in what the command spent. `baseline: false`
   (`--no-baseline`) skips the pass for half the price and the old, single-draw
   reading. `retrace ablate` exits non-zero when a cut did not reproduce.
+- **`repeat` on an ablation**, because a reproducing cut still leaves the drop
+  itself as one draw. A model handed a gap where a result should be does not
+  have to answer it the same way twice, and a trial that happened to arrive at
+  the recorded answer was reported `spare` — a call nothing depended on — off a
+  single fork. `repeat` (`--repeat N`) makes each drop that many times and gives
+  it a verdict only if every fork of it answered the same thing; one that
+  answered two ways is `unstable`, with `instability: "answer"` and the other
+  answer printed beside the first. The baselines are cut the same number of
+  times, so `reproduced` becomes a claim about the fork point rather than about
+  one visit to it, and a trial that fails both ways reports the cut, which
+  covers every trial at that step and is not something re-cutting would settle.
+  Every fork is held to the prefix it replayed as before, `maxForks` now counts
+  forks rather than calls so a cap that cannot afford a whole drop does not make
+  half of one, and the totals cover every fork made.
 - **`resume`.** A run killed partway through is carried on from its log: the
   whole prefix replays and execution goes live at the effect the log ends on, so
   a process that died at step 9 of 12 finishes for the price of three steps. It

@@ -21,10 +21,16 @@ import {
   type RunStore as Store,
 } from "../src/index.ts";
 import { provider, tools } from "./fixtures/ablate-module.ts";
+import {
+  provider as wobbly,
+  resetWobble,
+  tools as steady,
+} from "./fixtures/ablate-wobble-module.ts";
 import { tools as movingTools } from "./fixtures/moving-module.ts";
 
 const MODULE = fileURLToPath(new URL("./fixtures/ablate-module.ts", import.meta.url));
 const MOVING_MODULE = fileURLToPath(new URL("./fixtures/moving-module.ts", import.meta.url));
+const WOBBLE_MODULE = fileURLToPath(new URL("./fixtures/ablate-wobble-module.ts", import.meta.url));
 
 const agent = defineAgent({
   name: "researcher",
@@ -636,6 +642,174 @@ test("retrace ablate says so rather than exiting quietly when a trial never answ
   assert.equal(code, 0, text);
   assert.match(text, /0 of 0 recorded answers/);
   assert.match(text, /no fork ran, so there was nothing to hold to a prefix/);
+});
+
+test("a drop made once is one draw, and the draw here reads as a dependency it never had", async () => {
+  const store = new MemoryStore();
+  resetWobble();
+  await run("explain them", { agent, provider: wobbly, tools: steady, store, runId: "baseline" });
+
+  const once = await ablateRun("baseline", { provider: wobbly, tools: steady, store });
+
+  // The verdict a single cut supports, and the reason `--repeat` exists: the
+  // middle drop is reported `spare` off one fork that happened to answer the
+  // recorded answer, at a cut that reproduces perfectly.
+  assert.equal(once.repeat, 1);
+  assert.deepEqual(
+    once.trials.map((t) => t.verdict),
+    ["needed", "spare", "needed"],
+  );
+  assert.deepEqual(
+    once.baselines.map((b) => b.reproduced),
+    [true, true, true],
+  );
+});
+
+test("a drop made twice has a verdict only if the run answered the same thing both times", async () => {
+  const store = new MemoryStore();
+  resetWobble();
+  await run("explain them", { agent, provider: wobbly, tools: steady, store, runId: "baseline" });
+
+  const report = await ablateRun("baseline", { provider: wobbly, tools: steady, store, repeat: 2 });
+
+  assert.equal(report.repeat, 2);
+  assert.deepEqual(
+    report.trials.map((t) => t.verdict),
+    ["needed", "unstable", "needed"],
+  );
+  // The drops either side of it settled, so this is not `--repeat` making
+  // everything unstable — it is the one drop the run has two answers to.
+  assert.deepEqual(
+    report.trials.map((t) => t.alike),
+    [2, 1, 2],
+  );
+  const wobble = report.trials[1]!;
+  assert.equal(wobble.instability, "answer");
+  assert.deepEqual(
+    wobble.runs.map((r) => r.output),
+    [RECORDED_ANSWER, `${RECORDED_ANSWER}, on what is left`],
+  );
+  assert.equal(report.unstable, 1);
+  assert.equal(report.spare, 0, "the `spare` a single cut reported was one draw");
+  assert.equal(report.needed, 2);
+  for (const trial of report.trials) {
+    assert.equal(trial.runId, trial.runs[0]!.runId, "the run named is the first fork of the drop");
+    assert.equal(new Set(trial.runs.map((r) => r.runId)).size, 2, "two forks, two runs");
+  }
+});
+
+test("the cut is re-entered as many times as the drop, and holds only if all of them arrived", async () => {
+  const store = new MemoryStore();
+  resetWobble();
+  await run("explain them", { agent, provider: wobbly, tools: steady, store, runId: "baseline" });
+
+  const report = await ablateRun("baseline", { provider: wobbly, tools: steady, store, repeat: 2 });
+
+  // A cut asked once and answered once is the same single draw a trial is. The
+  // baselines are repeated with the drops so that `reproduced` is a claim about
+  // the fork point rather than about one visit to it.
+  for (const made of report.baselines) {
+    assert.equal(made.runs.length, 2);
+    assert.equal(made.held, 2);
+    assert.equal(made.reproduced, true);
+    assert.equal(made.runId, made.runs[0]!.runId);
+  }
+  assert.equal(report.control.baselines, 6, "three cuts, twice over");
+});
+
+test("a cut that does not reproduce is still the reason, however many times the drop was made", async () => {
+  const store = new MemoryStore();
+  const moving = movingCorpus();
+  await run("explain them", { agent, provider, tools: moving, store, runId: "baseline" });
+
+  const report = await ablateRun("baseline", { provider, tools: moving, store, repeat: 2 });
+
+  // Both instabilities are live here — the corpus moves under the trials as
+  // well as under the baselines — and the cut is the one reported, because it
+  // covers every trial at that step and re-cutting it would settle nothing.
+  assert.deepEqual(
+    report.trials.map((t) => t.instability),
+    ["cut", "cut", undefined],
+  );
+  assert.deepEqual(
+    report.trials.map((t) => t.verdict),
+    ["unstable", "unstable", "needed"],
+  );
+});
+
+test("every fork of every drop is held to the prefix it replayed, and paid for", async () => {
+  const store = new MemoryStore();
+  await record(store);
+
+  const report = await ablateRun("baseline", { provider, tools, store, repeat: 2 });
+
+  assert.equal(report.control.ok, true);
+  assert.equal(report.control.forks, 6, "three drops, twice over");
+  assert.equal(report.control.excused, 6, "one substituted value per fork, and no more");
+  // Each fork of a trial cuts where the other does, so the pair replays the
+  // count twice: 2+2, 4+4, 6+6.
+  assert.deepEqual(
+    report.trials.map((t) => t.claimed),
+    [2, 4, 6],
+  );
+  assert.equal(report.control.claimed, 24);
+  assert.equal(report.control.baselineClaimed, 24);
+
+  const spent = [...report.trials, ...report.baselines];
+  assert.ok(
+    Math.abs(report.costUsd - spent.reduce((n, r) => n + r.costUsd, 0)) < 1e-9,
+    "a trial's money is the money of every fork made for it",
+  );
+});
+
+test("the cap is spent in whole drops, since half a drop answers nothing", async () => {
+  const store = new MemoryStore();
+  await record(store);
+
+  const report = await ablateRun("baseline", { provider, tools, store, repeat: 2, maxForks: 3 });
+
+  assert.equal(report.trials.length, 1, "three forks buys one drop made twice, not one and a half");
+  assert.equal(report.control.forks, 2);
+  assert.equal(report.stopped, "capped at 3 forks: 2 recorded calls were not dropped");
+});
+
+test("a repeat that is not a whole number of forks is refused", async () => {
+  const store = new MemoryStore();
+  await record(store);
+
+  await assert.rejects(() => ablateRun("baseline", { provider, tools, store, repeat: 0 }), {
+    message: /repeat has to be a whole number of forks per drop, at least 1 — got 0/,
+  });
+});
+
+test("retrace ablate --repeat says which drop the run has two answers to", async (t: TestContext) => {
+  const { dir, store } = diskStore(t);
+  resetWobble();
+  await run("explain them", { agent, provider: wobbly, tools: steady, store, runId: "baseline" });
+
+  const io = capture();
+  const code = await main(
+    ["ablate", "baseline", "--dir", dir, "--module", WOBBLE_MODULE, "--repeat", "2"],
+    io,
+  );
+  const text = plain(io.text);
+
+  assert.equal(code, 1, "an ablation with a drop it cannot attribute is not a clean one");
+  assert.match(text, /3 recorded tool calls, each dropped from the step after it, 2 times over/);
+  assert.match(text, /step:1#0:lookup\s+unstable 1 of 2/);
+  assert.match(text, /step:0#0:lookup\s+needed\s+2 of 2/);
+  // What it answered the other time, which is the whole of what makes it
+  // unstable and is nowhere else in the report.
+  assert.match(text, /also: .*on what is left/);
+  assert.match(text, /unstable: step:1#0:lookup did not answer one way with that value dropped/);
+  assert.match(
+    text,
+    /1 of 2 forks made without it gave the answer above and the rest did not/,
+  );
+  assert.match(text, /2 of 3 recorded answers this run's conclusion depends on/);
+  // Six drops and six re-entries with nothing dropped: the price of asking twice.
+  assert.match(text, /reproduced: 6 forks re-entered the run at the same cuts/);
+  assert.match(text, /12 forks · \$/);
 });
 
 test("retrace ablate needs a run and the module its live tails run", async (t: TestContext) => {

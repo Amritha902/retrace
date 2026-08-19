@@ -41,10 +41,10 @@ import {
 import { renderReport } from "./report.ts";
 import { searchForkPoints } from "./search.ts";
 import { DEFAULT_STORE_DIR, RunStore } from "./store.ts";
-import { sweepForkPoint, type SweepControl, type SweepRun, type SweepTrial } from "./sweep.ts";
+import { sweepForkPoint, type SweepControl, type SweepTrial } from "./sweep.ts";
 import { lineageTrees, type TreeRun } from "./tree.ts";
 import { verifyRun } from "./verify.ts";
-import type { ContentBlock, ForkOrigin, Provider, RetraceEvent } from "./types.ts";
+import type { ContentBlock, ForkOrigin, Provider, RetraceEvent, RunStatus } from "./types.ts";
 
 const USAGE = `retrace — inspect and re-run recorded agent runs
 
@@ -101,14 +101,16 @@ Options
                             reproduces from there at all, so without it a trial
                             cannot tell its drop from the model moving on its
                             own — which is half the cost and the whole claim
-  --repeat <n>              cut each of search's fork points, or each of sweep's
-                            arms, n times instead of once (default 1). A fork
-                            point holds only if every fork made at it answers
-                            the same way, and an arm only if every cut of it
-                            answered the same thing, so a model that would have
-                            moved the answer on its own comes back "unstable"
-                            rather than as a change taking or a difference
-                            between two arms
+  --repeat <n>              cut each of search's fork points, each of sweep's
+                            arms, or each of ablate's drops, n times instead of
+                            once (default 1). A fork point holds only if every
+                            fork made at it answers the same way, an arm only if
+                            every cut of it answered the same thing, and a drop
+                            only if the run answered the same thing every time
+                            that value was taken away — so a model that would
+                            have moved the answer on its own comes back
+                            "unstable" rather than as a change taking, a
+                            difference between two arms, or a dependency
   -o, --out <path>          where report writes its HTML or export its bundle;
                             "-" for stdout (default: <run-id>.html, and
                             <run-id>.bundle.jsonl)
@@ -219,6 +221,7 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
         instead,
         maxForks,
         baseline: !noBaseline,
+        repeat,
       });
     case "resume":
       return cmdResume(io, store, rest[0], modulePath, reentry);
@@ -1237,22 +1240,30 @@ function printArm(io: Io, trial: SweepTrial, width: number, cuts: number): void 
   io.out(`${indent}${dim(truncate(trial.error ?? trial.output, 68))}\n`);
   // What an unstable arm answered instead, which is the whole of what makes it
   // unstable and is otherwise nowhere in the report.
-  for (const other of otherAnswers(trial)) {
+  for (const other of otherAnswers(trial.runs)) {
     io.out(`${indent}${dim(`also: ${truncate(other, 62)}`)}\n`);
   }
 }
 
+/** A repeated arm's or drop's fork, in the fields this printing reads of it. */
+interface Answered {
+  status: RunStatus;
+  output: string;
+  error?: string;
+}
+
 /**
- * The answers an arm gave that were not its first, each named once. An arm that
- * settled has none, so this is empty for every arm but the finding.
+ * The answers a set of forks gave that were not the first's, each named once.
+ * An arm or a drop that settled has none, so this is empty for everything but
+ * the finding.
  */
-function otherAnswers(trial: SweepTrial): string[] {
-  const first = trial.runs[0];
+function otherAnswers(runs: readonly Answered[]): string[] {
+  const first = runs[0];
   if (first === undefined) return [];
-  const said = (run: SweepRun) => run.error ?? run.output;
+  const said = (run: Answered) => run.error ?? run.output;
   const seen = new Set([`${first.status} ${said(first)}`]);
   const others: string[] = [];
-  for (const run of trial.runs.slice(1)) {
+  for (const run of runs.slice(1)) {
     const key = `${run.status} ${said(run)}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -1323,6 +1334,7 @@ async function cmdAblate(
     instead: string | undefined;
     maxForks: number | undefined;
     baseline: boolean;
+    repeat: number | undefined;
   },
 ): Promise<number> {
   if (!runId) return fail(io, "ablate needs a run id");
@@ -1333,12 +1345,14 @@ async function cmdAblate(
   const parent = inspect(runId, store);
   const mod = await loadRunModule(modulePath);
   const calls = recordedToolCalls(store.read(runId));
+  const cuts = narrow.repeat ?? 1;
 
   io.out(`${bold(runId)}  ${statusLabel(parent.status)}  ${dim(`· ${plural(parent.steps, "step")}`)}\n`);
   io.out(
     dim(
       `${parent.agent.name} · ${parent.agent.model} · ` +
-        `${plural(calls.length, "recorded tool call")}, each dropped from the step after it\n\n`,
+        `${plural(calls.length, "recorded tool call")}, each dropped from the step after it` +
+        `${cuts > 1 ? `, ${cuts} times over` : ""}\n\n`,
     ),
   );
   if (calls.length === 0) {
@@ -1357,6 +1371,7 @@ async function cmdAblate(
     ...(narrow.only.length > 0 ? { only: narrow.only } : {}),
     ...(narrow.instead === undefined ? {} : { instead: narrow.instead }),
     ...(narrow.maxForks === undefined ? {} : { maxForks: narrow.maxForks }),
+    ...(narrow.repeat === undefined ? {} : { repeat: narrow.repeat }),
     onDivergence: onDivergence ?? "strict",
     allowIrreversible,
     // The baselines all run before the first trial, since a trial's verdict is
@@ -1370,7 +1385,7 @@ async function cmdAblate(
         io.out(`${ablationBaselineLine(baselines)}\n\n`);
         baselines.length = 0;
       }
-      printAblation(io, trial, width);
+      printAblation(io, trial, width, cuts);
     },
   });
 
@@ -1378,7 +1393,20 @@ async function cmdAblate(
   io.out(
     `\n${report.needed} of ${plural(tried, "recorded answer")} this run's conclusion depends on\n`,
   );
-  if (report.unstable > 0) io.out(`${ablationDriftLine(report)}\n`);
+  // The drop that answered two ways is the finding `--repeat` exists to
+  // produce, and it is a fact about that one call rather than about its cut —
+  // so it is said per trial, above the line that covers a whole cut.
+  for (const trial of report.trials.filter((t) => t.instability === "answer")) {
+    io.out(
+      `${yellow(`unstable: ${trial.key}`)} did not answer one way with that value dropped\n` +
+        dim(
+          `  ${trial.alike} of ${plural(trial.runs.length, "fork")} made without it gave the ` +
+            `answer above and the rest did not — so\n  there is nothing about the drop to read ` +
+            `off what they said\n`,
+        ),
+    );
+  }
+  if (report.trials.some((t) => t.instability === "cut")) io.out(`${ablationDriftLine(report)}\n`);
   if (report.stopped !== undefined) io.out(dim(`${report.stopped}\n`));
   io.out(`${ablationControlLine(report.control, runId)}\n`);
   io.out(
@@ -1399,8 +1427,11 @@ async function cmdAblate(
  * verdicts below it are about the drops at all.
  */
 function ablationBaselineLine(baselines: readonly AblationBaseline[]): string {
-  const held = baselines.filter((b) => b.reproduced).length;
-  if (held === baselines.length) {
+  // The count that carries the claim is the forks, not the cuts: with --repeat
+  // a cut is re-entered several times and reproduces only if all of them did.
+  const forks = baselines.reduce((n, b) => n + b.runs.length, 0);
+  const held = baselines.reduce((n, b) => n + b.held, 0);
+  if (held === forks) {
     return (
       green("reproduced") +
       `: ${plural(held, "fork")} re-entered the run at the same cuts with nothing ` +
@@ -1410,7 +1441,7 @@ function ablationBaselineLine(baselines: readonly AblationBaseline[]): string {
   const moved = baselines.filter((b) => !b.reproduced).map((b) => `step ${b.atStep}`);
   return (
     yellow("did not reproduce") +
-    `: ${baselines.length - held} of ${plural(baselines.length, "fork")} made with nothing ` +
+    `: ${forks - held} of ${plural(forks, "fork")} made with nothing ` +
     `dropped answered something else — ${moved.join(", ")}`
   );
 }
@@ -1418,22 +1449,27 @@ function ablationBaselineLine(baselines: readonly AblationBaseline[]): string {
 /** Why the trials at a cut that moved on its own are not findings. */
 function ablationDriftLine(report: AblationReport): string {
   const moved = report.baselines.filter((b) => !b.reproduced);
+  const at = report.trials.filter((t) => t.instability === "cut").length;
   return (
-    `${plural(report.unstable, "trial")} cut where the run does not reproduce itself ` +
+    `${plural(at, "trial")} cut where the run does not reproduce itself ` +
     `(${moved.map((b) => `step ${b.atStep}`).join(", ")}), so what ` +
-    `${report.unstable === 1 ? "it" : "they"} answered is not a fact about the dropped value`
+    `${at === 1 ? "it" : "they"} answered is not a fact about the dropped value`
   );
 }
 
-function printAblation(io: Io, trial: AblationTrial, width: number): void {
+function printAblation(io: Io, trial: AblationTrial, width: number, cuts: number): void {
   const paint =
     trial.verdict === "needed" ? cyan : trial.verdict === "spare" ? dim : (s: string) => yellow(s);
   const label = trial.verdict === "inconclusive" ? statusLabel(trial.status) : paint(trial.verdict);
   const stale = trial.staleFacets.length > 0 ? dim(`  ${trial.staleFacets.join(", ")}`) : "";
   const indent = `  ${" ".repeat(width)}  `;
+  // A verdict is enough for a drop made once. Made several times, how many of
+  // those forks agreed is the thing worth reading — most of all on the ones
+  // that didn't.
+  const tally = cuts > 1 ? dim(` ${trial.alike} of ${trial.runs.length}`) : "";
 
   io.out(
-    `  ${trial.key.padEnd(width)}  ${padLabel(label, 8)} ` +
+    `  ${trial.key.padEnd(width)}  ${padLabel(label, 8)}${tally} ` +
       dim(`${formatUsd(trial.billedUsd)} billed · ${formatUsd(trial.savedUsd)} free`) +
       `${stale}\n`,
   );
@@ -1446,6 +1482,11 @@ function printAblation(io: Io, trial: AblationTrial, width: number): void {
   );
   io.out(`${indent}${dim(trial.runId)}\n`);
   io.out(`${indent}${truncate(trial.error ?? trial.output, 68)}\n`);
+  // What the run said the other times this value was dropped, which is the
+  // whole of what makes the trial unstable and is otherwise nowhere in it.
+  for (const other of otherAnswers(trial.runs)) {
+    io.out(`${indent}${dim(`also: ${truncate(other, 62)}`)}\n`);
+  }
 }
 
 /**

@@ -6,7 +6,9 @@ export {
   type AblationControl,
   type AblationOptions,
   type AblationReport,
+  type AblationRun,
   type AblationTrial,
+  type Instability,
 } from "./ablate.ts";
 export { AMBIENT_SOURCES, type AmbientSource } from "./ambient.ts";
 export {
