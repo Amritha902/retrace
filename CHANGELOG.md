@@ -73,7 +73,18 @@ publish contains rather than what changed since something.
   effects every arm replayed identically and how many of those were values an
   arm was told to substitute. An arm the runtime refuses — an override this fork
   point would serve to nobody is the one that happens — is reported `not_run`
-  with the reason, and the other arms still run.
+  with the reason, and the other arms still run. `repeat` cuts each arm more
+  than once, for the reason `searchForkPoints` takes the same option: one cut is
+  one draw of the model, and a sweep's whole output is a comparison between
+  arms, so a difference read off an arm whose answer moves on its own is
+  attributed to the one thing that did not cause it. An arm answers for the
+  sweep only if every cut of it answered the same thing — the same output, the
+  same ending — and one that answered two ways is reported `unstable`, printed
+  with what else it said, and exits the CLI non-zero, while the arms that
+  settled still stand. All the cuts go into the controlled check together, since
+  the cuts of one arm are siblings of the cuts of every other. A refusal is read
+  off the log and the arm's own fields, so it is met once rather than `repeat`
+  times.
 - **`ablateRun`.** Which of the answers a run collected did its conclusion
   actually rest on — a question the log holds every half of and cannot settle,
   because a result that was read and a result that was ignored look identical in

@@ -1,6 +1,6 @@
 import { holdSharedPrefix, type SharedLog, type SharedPrefix } from "./compare.ts";
 import { DETERMINISTIC_KINDS, type Overrides, type RecordedEffect } from "./journal.ts";
-import { effectsOf, fork, summarize, type ReenterOptions } from "./replay.ts";
+import { effectsOf, fork, repeatCount, summarize, type ReenterOptions } from "./replay.ts";
 import { newRunId, RunStore } from "./store.ts";
 import type { AgentSpec, RunResult, RunStatus } from "./types.ts";
 
@@ -154,7 +154,7 @@ export async function searchForkPoints(
   const floor = overrideFloor(recorded, options.overrides ?? {});
   const downTo = Math.max(options.downTo ?? 0, floor.step);
   const matches = options.until ?? ((result) => result.output !== parent.output);
-  const repeat = repeatCount(options.repeat);
+  const repeat = repeatCount(options.repeat, "fork point");
 
   const tried: SearchTrial[] = [];
   let found: SearchTrial | undefined;
@@ -246,23 +246,6 @@ export async function searchForkPoints(
     billedUsd: total((t) => t.billedUsd),
     savedUsd: total((t) => t.savedUsd),
   };
-}
-
-/**
- * How many times to cut each fork point.
- *
- * Zero forks at a fork point is a search that reports on nothing, so it is
- * refused rather than quietly taken as one — the caller asking for it means
- * something, and what they mean is not "the default".
- */
-function repeatCount(repeat: number | undefined): number {
-  if (repeat === undefined) return 1;
-  if (!Number.isInteger(repeat) || repeat < 1) {
-    throw new Error(
-      `repeat has to be a whole number of forks per fork point, at least 1 — got ${repeat}`,
-    );
-  }
-  return repeat;
 }
 
 /**

@@ -161,6 +161,7 @@ export {
   type SweepControl,
   type SweepOptions,
   type SweepReport,
+  type SweepRun,
   type SweepTrial,
 } from "./sweep.ts";
 export { objectSchema, tool, type ToolDefinition } from "./tools.ts";

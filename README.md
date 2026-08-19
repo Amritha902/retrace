@@ -728,6 +728,64 @@ best, and `tree` draws the whole sweep under the run it came from.
 
 In code it is `sweepForkPoint(runId, { provider, tools, atStep, arms })`.
 
+### Whether the difference is the arm
+
+Every arm above is cut once, and once is a single draw of whatever the model
+does at that fork point. Two arms answering differently is the finding a sweep
+exists to produce — and it is a finding about the *arms* only if that fork point
+answers the same thing twice with nothing varied. A model with a temperature
+moves the answer on its own, and a sweep read as *the prompt did it* has
+attributed the difference to the one thing that did not cause it.
+
+`--repeat` cuts every arm more than once and holds it to all of them:
+
+```
+$ retrace sweep demo-original --at 3 --module ./agent-module.ts --repeat 3
+
+demo-original  completed  · 4 steps
+analyst · claude-opus-5 · 3 arms at step 3, off one replayed prefix, 3 times over each
+
+  terse         completed  3 of 3  $0.6900 billed · $2.0700 free  system
+                sweep_20260819T1204_6c138cb4
+                Large market. Crowded. Per-seat pricing.
+  cited         unstable   2 of 3  $0.7200 billed · $2.0700 free  system
+                sweep_20260819T1204_ddc7db38
+                The market is large and contested (market size, competitors).
+                also: …contested — see market size, competitors.
+  empty-corpus  completed  3 of 3  $0.6600 billed · $2.0700 free  conversation
+                sweep_20260819T1204_64d5ef86
+                Market size unknown. Crowded. Per-seat pricing.
+
+unstable: "cited" answered more than one way at this fork point
+  2 of 3 forks made for it gave the answer above and the rest did not — a
+  difference between it and another arm is not something the arms account for
+controlled: 6 effects replayed identically by all 9 forks of the 3 arms, 1 of them a value an arm was told to substitute
+3 arms · $2.0700 billed · $6.2100 not spent again out of $8.2800
+```
+
+An arm holds only if *every* cut of it answered the same thing — the same
+answer and the same ending, so a cut that stopped on a budget where another one
+answered has not agreed with it either. The `also:` line is what the unstable
+arm said the other time, printed from the point it parted from the first rather
+than from its start, since two answers to one question usually agree for a while
+and differ at the end.
+
+The sweep exits non-zero on it, and the rest of it still stands: `terse` and
+`empty-corpus` settled, and they are still comparable with each other. What you
+have lost is `cited`, which is precisely the arm you would otherwise have read a
+difference off.
+
+The prefix is free for all of them, which is what makes asking three times
+affordable: nine cuts of step 3 are nine live tails, not nine runs. `controlled`
+counts every one of them, because the cuts of one arm are siblings of the cuts
+of every other — they differ in the arm and above the fork point, and nowhere
+else.
+
+This is [`search --repeat`](#one-fork-is-one-draw) asked at a fixed fork point
+instead of a moving one, and [the cut with nothing
+dropped](#the-cut-with-nothing-dropped) asked about a change instead of a drop.
+All three are the same question: is the thing I varied what moved the answer.
+
 ## Which answers the answer needed
 
 A finished run is a conclusion and a pile of things the agent went and looked
@@ -1229,6 +1287,7 @@ retrace plan <run-id> --at N  # what that fork would replay, save and go stale o
 retrace search <run-id>       # …fork downward until the change takes, cheapest first
 retrace search … --repeat N   # …cutting each fork point N times, so one draw is not the answer
 retrace sweep <run-id> --at N # …or try several changes at one point, off one prefix
+retrace sweep … --repeat N    # …cutting each arm N times, so one draw is not the arm
 retrace ablate <run-id>       # drop each recorded answer, and see which the answer needed
 retrace ablate … --no-baseline # …without re-entering each cut to check the run reproduces
 retrace resume <run-id>       # carry on a run that stopped early, from its log
@@ -2079,9 +2138,15 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
   the fork point identically — a fact about the effects they replayed, and one
   that says nothing about the answers they gave. Two arms that vary a prompt and
   answer the same are a change that did not take; two that answer differently
-  with nothing varied between them are the model's own temperature. `diff` on
-  the two runs is what separates those, and `search` is what asks how far down
-  the change would have to go to take.
+  with nothing varied between them are the model's own temperature. Cut once —
+  the default — an arm is a single draw, so a difference between two arms is a
+  difference between two draws as much as between two changes. `repeat` above
+  one is what separates them: an arm holds only if every cut of it answered the
+  same thing, and one that answered two ways comes back `unstable` rather than
+  as a difference the arms account for. It bounds the same two things `search
+  --repeat` does — an arm that read the same every time was sampled rather than
+  proved, and the recorded run is still the sample nothing here can take again.
+  `search` remains what asks how far down a change would have to go to take.
 - **`ablate` makes the forks too, and what it measures is a stand-in rather than
   an absence.** Every trial executes its own live tail for real, so the
   `irreversible` hazard arrives once per recorded call whose tail would repeat
@@ -2107,7 +2172,7 @@ Retrace guarantees the *agent loop* is deterministic given its journal. It does 
 
 Early, and not yet on npm. The core — journal, agent loop, fork (at a step or at
 one recorded call), replay, resume, budgets, store, CLI, the clock/uuid/random effects, the journaled `ctx.fetch` that brings a tool's network reads — what it asked, body and all, and what came back — inside the boundary, the `ctx.read` that does the same for the database queries, subprocesses and native clients no wrapper can intercept, per-component request and tool-call digests, the `stale` marking built on them and the `stale` command that reads a run against its parent to say what moved, value overrides, recorded model-call failures, the HTML report, streaming, parallel tool calls, the `verify` audit including the `requests` check that rebuilds a run's own requests from its own log, the `reads` check that holds every journaled read to the call that made it and to the question its own slot is a digest of, and the `conclusion` check that holds a run's reported answer and ending to the response its log ends on, the `diff` comparison that holds two logs to the prefix they claim from the same source and says whether the two runs were asking the same thing where they parted, and the `recheck` re-execution including its `unstable` finding, the watch on the
-ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, the `tree` view that draws a store as the family of runs it actually is, the `search` walk that forks downward until a change takes and reports the cheapest fork point it did, its `--repeat` that cuts each fork point several times so a model that moved the answer on its own comes back `unstable` rather than as a finding, the `sweep` that tries several changes at one fork point off one replayed prefix and holds the arms to the prefix they shared, and the `ablate` that drops each recorded answer in turn to say which of them the run's conclusion needed, re-entering each of its cuts with nothing dropped so a run that does not reproduce from one comes back `unstable` rather than as a dependency — is covered by 515 tests that run without network access — including a seeded property check that generates dozens of run shapes and holds each of them to the two guarantees the runtime rests on: a replay reproduces the log effect for effect and executes nothing, and a pure-tools fork at every step reproduces its parent. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
+ambient clock, RNG and `fetch` that says at record time which tool answers are snapshots, the lineage bundles `export` and `import` move between stores, the `irreversible` mark that stops a re-entered run from repeating a call the world cannot take back, the `plan` command that says what a fork would replay, save, go stale on and refuse before any of it is paid for, the `tree` view that draws a store as the family of runs it actually is, the `search` walk that forks downward until a change takes and reports the cheapest fork point it did, its `--repeat` that cuts each fork point several times so a model that moved the answer on its own comes back `unstable` rather than as a finding, the `sweep` that tries several changes at one fork point off one replayed prefix and holds the arms to the prefix they shared, its `--repeat` that cuts each arm several times so an arm whose answer moved on its own comes back `unstable` rather than as a difference between it and the arms beside it, and the `ablate` that drops each recorded answer in turn to say which of them the run's conclusion needed, re-entering each of its cuts with nothing dropped so a run that does not reproduce from one comes back `unstable` rather than as a dependency — is covered by 524 tests that run without network access — including a seeded property check that generates dozens of run shapes and holds each of them to the two guarantees the runtime rests on: a replay reproduces the log effect for effect and executes nothing, and a pure-tools fork at every step reproduces its parent. GitHub Actions runs the typecheck, the suite, the build, the demo and a packing dry run on every push and pull request, on Node 22 and Node 24, with no API key in the environment — so the "no network, no key" claim above is checked rather than asserted.
 
 The `AnthropicProvider` adapter has tests behind it. Against a stub client, they pin the request body it builds (model, tokens, system, tools, adaptive thinking, `effort`, the server-side fallback parameter and its beta), the content-block normalization in both directions, the byte-for-byte `raw` passthrough that signed thinking blocks depend on, and the reassembly of a streamed turn — text, a signature arriving in pieces, a tool's partial JSON — back into the message the unstreamed endpoint would have returned. It is still **not verified against the live API from this repo**: the two integration tests that do that — `[live]`, in `test/anthropic.test.ts` and `test/streaming.test.ts` — skip themselves when `ANTHROPIC_API_KEY` is unset, which is how they have run so far. Set a key and run them to close that gap.
 
@@ -2115,7 +2180,7 @@ The `AnthropicProvider` adapter has tests behind it. Against a stub client, they
 
 ```bash
 npm install
-npm test           # 515 tests, no network, no API key
+npm test           # 524 tests, no network, no API key
                    # with ANTHROPIC_API_KEY set, two more run against the live API
 npm run typecheck
 npm run build

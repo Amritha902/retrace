@@ -196,6 +196,26 @@ export type ForkPoint =
 export type ForkOptions = ReenterOptions & ForkPoint;
 
 /**
+ * How many times to make the same re-entry, given what a caller asked for.
+ *
+ * One fork is one draw of whatever the model does at the fork point, and both
+ * `search` and `sweep` have a reading that a single draw cannot support — so
+ * both take a `repeat`, and `per` is the thing each of them cuts that many
+ * times. Zero of them reports on nothing, so it is refused rather than quietly
+ * taken as the default: a caller asking for it means something, and what they
+ * mean is not "once".
+ */
+export function repeatCount(repeat: number | undefined, per: string): number {
+  if (repeat === undefined) return 1;
+  if (!Number.isInteger(repeat) || repeat < 1) {
+    throw new Error(
+      `repeat has to be a whole number of forks per ${per}, at least 1 — got ${repeat}`,
+    );
+  }
+  return repeat;
+}
+
+/**
  * Re-run a recorded run with something changed.
  *
  * The prefix below the fork point comes out of the parent's log — no network,

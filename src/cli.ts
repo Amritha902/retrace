@@ -41,7 +41,7 @@ import {
 import { renderReport } from "./report.ts";
 import { searchForkPoints } from "./search.ts";
 import { DEFAULT_STORE_DIR, RunStore } from "./store.ts";
-import { sweepForkPoint, type SweepTrial } from "./sweep.ts";
+import { sweepForkPoint, type SweepControl, type SweepRun, type SweepTrial } from "./sweep.ts";
 import { lineageTrees, type TreeRun } from "./tree.ts";
 import { verifyRun } from "./verify.ts";
 import type { ContentBlock, ForkOrigin, Provider, RetraceEvent } from "./types.ts";
@@ -101,11 +101,14 @@ Options
                             reproduces from there at all, so without it a trial
                             cannot tell its drop from the model moving on its
                             own — which is half the cost and the whole claim
-  --repeat <n>              cut each of search's fork points n times instead of
-                            once (default 1). A fork point holds only if every
-                            fork made at it answers the same way, so a model
-                            that would have moved the answer on its own comes
-                            back "unstable" rather than as a change taking
+  --repeat <n>              cut each of search's fork points, or each of sweep's
+                            arms, n times instead of once (default 1). A fork
+                            point holds only if every fork made at it answers
+                            the same way, and an arm only if every cut of it
+                            answered the same thing, so a model that would have
+                            moved the answer on its own comes back "unstable"
+                            rather than as a change taking or a difference
+                            between two arms
   -o, --out <path>          where report writes its HTML or export its bundle;
                             "-" for stdout (default: <run-id>.html, and
                             <run-id>.bundle.jsonl)
@@ -209,7 +212,7 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
         repeat,
       });
     case "sweep":
-      return cmdSweep(io, store, rest[0], atRaw, modulePath, reentry);
+      return cmdSweep(io, store, rest[0], atRaw, modulePath, reentry, repeat);
     case "ablate":
       return cmdAblate(io, store, rest[0], modulePath, reentry, {
         only,
@@ -1135,6 +1138,7 @@ async function cmdSweep(
   atRaw: string | undefined,
   modulePath: string | undefined,
   { overrides, onDivergence, allowIrreversible }: Reentry,
+  repeat: number | undefined,
 ): Promise<number> {
   if (!runId) return fail(io, "sweep needs a run id");
   if (atRaw === undefined) {
@@ -1164,11 +1168,12 @@ async function cmdSweep(
   const agent = { ...parent.agent, ...mod.agent };
   const where = at.atEffect ?? `step ${at.atStep}`;
 
+  const cuts = repeat ?? 1;
   io.out(`${bold(runId)}  ${statusLabel(parent.status)}  ${dim(`· ${plural(parent.steps, "step")}`)}\n`);
   io.out(
     dim(
       `${agent.name} · ${agent.model} · ${plural(mod.arms.length, "arm")} at ${where}, ` +
-        `off one replayed prefix\n\n`,
+        `off one replayed prefix${cuts > 1 ? `, ${cuts} times over each` : ""}\n\n`,
     ),
   );
 
@@ -1185,24 +1190,44 @@ async function cmdSweep(
     overrides,
     onDivergence: onDivergence ?? "strict",
     allowIrreversible,
-    onTrial: (trial) => printArm(io, trial, width),
+    ...(repeat === undefined ? {} : { repeat }),
+    onTrial: (trial) => printArm(io, trial, width, cuts),
   });
 
-  io.out(`\n${controlLine(report.control)}\n`);
+  io.out("\n");
+  // The arm that answered two ways is the finding `--repeat` exists to produce,
+  // and it is worth saying before the arithmetic: a difference read off it is a
+  // difference the arms do not account for.
+  for (const arm of report.arms.filter((a) => a.unstable)) {
+    io.out(
+      `${yellow(`unstable: "${arm.name}"`)} answered more than one way at this fork point\n` +
+        dim(
+          `  ${arm.alike} of ${plural(arm.runs.length, "fork")} made for it gave the answer ` +
+            `above and the rest did not — a\n  difference between it and another arm is not ` +
+            `something the arms account for\n`,
+        ),
+    );
+  }
+  io.out(`${controlLine(report.control)}\n`);
   io.out(
     dim(
       `${plural(report.arms.length, "arm")} · ${formatUsd(report.billedUsd)} billed · ` +
         `${formatUsd(report.savedUsd)} not spent again out of ${formatUsd(report.costUsd)}\n`,
     ),
   );
-  return report.control.ok && report.arms.every((a) => a.status === "completed") ? 0 : 1;
+  const answered = report.arms.every((a) => a.status === "completed" && !a.unstable);
+  return report.control.ok && answered ? 0 : 1;
 }
 
-function printArm(io: Io, trial: SweepTrial, width: number): void {
+function printArm(io: Io, trial: SweepTrial, width: number, cuts: number): void {
   const moved = trial.staleFacets.length > 0 ? dim(`  ${trial.staleFacets.join(", ")}`) : "";
   const indent = `  ${" ".repeat(width)}  `;
+  // A status is enough for an arm cut once. Cut several times, how many of those
+  // cuts agreed is the thing worth reading — most of all on the ones that didn't.
+  const verdict = trial.unstable ? yellow("unstable") : statusLabel(trial.status);
+  const tally = cuts > 1 && trial.runs.length > 0 ? dim(` ${trial.alike} of ${trial.runs.length}`) : "";
   io.out(
-    `  ${padLabel(trial.name, width)}  ${padLabel(statusLabel(trial.status), 10)} ` +
+    `  ${padLabel(trial.name, width)}  ${padLabel(verdict, 10)}${tally} ` +
       dim(`${formatUsd(trial.billedUsd)} billed · ${formatUsd(trial.savedUsd)} free`) +
       `${moved}\n`,
   );
@@ -1210,32 +1235,75 @@ function printArm(io: Io, trial: SweepTrial, width: number): void {
   // — show, diff and verify want the id.
   if (trial.runId !== undefined) io.out(`${indent}${dim(trial.runId)}\n`);
   io.out(`${indent}${dim(truncate(trial.error ?? trial.output, 68))}\n`);
+  // What an unstable arm answered instead, which is the whole of what makes it
+  // unstable and is otherwise nowhere in the report.
+  for (const other of otherAnswers(trial)) {
+    io.out(`${indent}${dim(`also: ${truncate(other, 62)}`)}\n`);
+  }
+}
+
+/**
+ * The answers an arm gave that were not its first, each named once. An arm that
+ * settled has none, so this is empty for every arm but the finding.
+ */
+function otherAnswers(trial: SweepTrial): string[] {
+  const first = trial.runs[0];
+  if (first === undefined) return [];
+  const said = (run: SweepRun) => run.error ?? run.output;
+  const seen = new Set([`${first.status} ${said(first)}`]);
+  const others: string[] = [];
+  for (const run of trial.runs.slice(1)) {
+    const key = `${run.status} ${said(run)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    // A cut that stopped somewhere else did not answer the same thing either,
+    // and its text alone would not say so.
+    const text = partedAt(said(run), said(first));
+    others.push(run.status === first.status ? text : `${run.status}: ${text}`);
+  }
+  return others;
+}
+
+/**
+ * One answer from the point where it parted from another.
+ *
+ * Two answers to the same question usually agree for a while and part late, so
+ * printing this one from its start and cutting it at the width would show the
+ * half they have in common and hide the half that makes it a different answer.
+ */
+function partedAt(said: string, from: string): string {
+  let shared = 0;
+  while (shared < said.length && shared < from.length && said[shared] === from[shared]) shared++;
+  // Below a line's worth there is nothing to save, and a whole answer reads
+  // better than an elided one.
+  if (shared < 24) return said;
+  const word = said.lastIndexOf(" ", shared);
+  return word <= 0 ? said : `…${said.slice(word + 1)}`;
 }
 
 /**
  * What the arms shared, which is the whole claim a sweep makes over running the
  * agent once per arm: they differ in what was varied and in nothing below it.
  */
-function controlLine(control: {
-  arms: number;
-  claimed: number;
-  excused: number;
-  contradiction?: string;
-  ok: boolean;
-}): string {
+function controlLine(control: SweepControl): string {
   if (!control.ok) return `${red("not controlled")}: ${control.contradiction}`;
-  if (control.arms < 2) {
-    return dim(`one arm ran, so there was nothing to hold its prefix against`);
+  if (control.runs < 2) {
+    return dim(`one arm ran once, so there was nothing to hold its prefix against`);
   }
   const substituted =
     control.excused === 0
       ? ""
       : `, ${control.excused} of them ${control.excused === 1 ? "a value" : "values"} ` +
         `an arm was told to substitute`;
+  // With one cut per arm the forks *are* the arms and saying it twice reads as
+  // an error. With more, the count that carries the claim is the forks.
+  const by =
+    control.runs === control.arms
+      ? `all ${plural(control.arms, "arm")}`
+      : `all ${plural(control.runs, "fork")} of the ${plural(control.arms, "arm")}`;
   return (
     green("controlled") +
-    `: ${plural(control.claimed, "effect")} replayed identically by all ` +
-    `${plural(control.arms, "arm")}${substituted}`
+    `: ${plural(control.claimed, "effect")} replayed identically by ${by}${substituted}`
   );
 }
 

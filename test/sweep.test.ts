@@ -19,8 +19,15 @@ import {
   type RunStore as Store,
 } from "../src/index.ts";
 import { arms, provider, tools } from "./fixtures/sweep-module.ts";
+import {
+  arms as wobbleArms,
+  provider as wobbleProvider,
+  resetWobble,
+  tools as wobbleTools,
+} from "./fixtures/sweep-wobble-module.ts";
 
 const MODULE = fileURLToPath(new URL("./fixtures/sweep-module.ts", import.meta.url));
+const WOBBLE = fileURLToPath(new URL("./fixtures/sweep-wobble-module.ts", import.meta.url));
 
 const agent = defineAgent({
   name: "researcher",
@@ -308,6 +315,253 @@ test("sweep asks for the run, the fork point and the arms it needs", async (t) =
     1,
   );
   assert.match(io.text(), /exports no arms/);
+});
+
+test("an arm is cut once unless the sweep is asked for more", async () => {
+  const store = new MemoryStore();
+  await record(store);
+
+  const report = await sweepForkPoint("baseline", { provider, tools, store, atStep: 2, arms });
+
+  assert.equal(report.repeat, 1);
+  for (const arm of report.arms) {
+    assert.equal(arm.runs.length, 1);
+    assert.equal(arm.alike, 1);
+    assert.equal(arm.unstable, false, "one draw cannot disagree with itself");
+    assert.equal(arm.runs[0]?.runId, arm.runId, "the arm reads as the one fork it made");
+  }
+});
+
+test("repeat cuts every arm that many times, and every cut is a run of its own", async (t) => {
+  const dir = tempDir(t);
+  const store = new RunStore(dir);
+  await record(store);
+
+  const report = await sweepForkPoint("baseline", {
+    provider,
+    tools,
+    store,
+    atStep: 2,
+    arms,
+    repeat: 3,
+  });
+
+  assert.equal(report.repeat, 3);
+  const made = new Set<string>();
+  for (const arm of report.arms) {
+    assert.equal(arm.runs.length, 3, `${arm.name} was cut three times`);
+    assert.equal(arm.alike, 3, `${arm.name} answered the same thing every time`);
+    assert.equal(arm.unstable, false);
+    assert.deepEqual(
+      new Set(arm.runs.map((r) => r.output)),
+      new Set([arm.output]),
+      "and the arm reads as any one of them",
+    );
+    for (const made_ of arm.runs) {
+      assert.equal(made.has(made_.runId), false, "each cut is its own run");
+      made.add(made_.runId);
+      assert.equal(verifyRun(made_.runId, store).ok, true, `${made_.runId} verifies`);
+      assert.equal(inspect(made_.runId, store).forkedFrom?.runId, "baseline");
+    }
+  }
+  assert.equal(made.size, 9, "three arms, three cuts each");
+});
+
+test("the cuts of every arm are held to the one prefix all of them replayed", async () => {
+  const store = new MemoryStore();
+  await record(store);
+
+  const report = await sweepForkPoint("baseline", {
+    provider,
+    tools,
+    store,
+    atStep: 2,
+    arms,
+    repeat: 3,
+  });
+
+  assert.equal(report.control.ok, true);
+  assert.equal(report.control.arms, 3);
+  assert.equal(report.control.runs, 9, "every fork the sweep made, not one per arm");
+  assert.equal(report.control.claimed, 4, "two model calls and two tool calls below step 2");
+  assert.equal(report.control.excused, 1, "the one value the third arm was told to substitute");
+
+  // The claim from the outside, on two cuts of the *same* arm: they are
+  // siblings like any other pair, and differ in nothing below the fork point —
+  // which leaves the model as the only thing a difference between them can be.
+  const [first, second] = report.arms[0]!.runs;
+  const seen = compareRuns(first!.runId, second!.runId, store);
+  assert.equal(seen.kinship.kind, "siblings");
+  assert.equal(seen.ok, true);
+  assert.equal(seen.claimed, 4);
+});
+
+test("an arm whose answer moved on its own comes back unstable, and the rest still stands", async () => {
+  const store = new MemoryStore();
+  resetWobble();
+  await run("explain alpha and beta", {
+    agent,
+    provider: wobbleProvider,
+    tools: wobbleTools,
+    store,
+    runId: "baseline",
+  });
+  resetWobble();
+
+  const report = await sweepForkPoint("baseline", {
+    provider: wobbleProvider,
+    tools: wobbleTools,
+    store,
+    atStep: 2,
+    arms: wobbleArms,
+    repeat: 3,
+  });
+
+  const [steady, wobbly] = report.arms;
+  assert.equal(steady?.unstable, false);
+  assert.equal(steady?.alike, 3);
+  assert.equal(steady?.output, "Answer plainly. :: definition of alpha | definition of beta");
+
+  assert.equal(wobbly?.unstable, true, "it hedged on the second of its three cuts");
+  assert.equal(wobbly?.alike, 2);
+  assert.deepEqual(
+    wobbly?.runs.map((r) => r.output),
+    [
+      "Answer, and hedge it. :: definition of alpha | definition of beta",
+      "Answer, and hedge it. :: definition of alpha | definition of beta, or so they say",
+      "Answer, and hedge it. :: definition of alpha | definition of beta",
+    ],
+  );
+  // The finding is about the one arm. Nothing about the other arm's answer is
+  // in doubt, and the prefix both of them replayed is held either way.
+  assert.equal(report.control.ok, true);
+  assert.equal(report.control.runs, 6);
+});
+
+test("a cut that stopped somewhere else is not the same answer as one that finished", async () => {
+  const store = new MemoryStore();
+  resetWobble();
+  await run("explain alpha and beta", {
+    agent,
+    provider: wobbleProvider,
+    tools: wobbleTools,
+    store,
+    runId: "baseline",
+  });
+  resetWobble();
+
+  const report = await sweepForkPoint("baseline", {
+    provider: wobbleProvider,
+    tools: wobbleTools,
+    store,
+    atStep: 2,
+    // This prompt answers once and throws the next time, so the second cut ends
+    // where the first one answered — no answer at all rather than another one.
+    arms: [{ name: "brittle", agent: { system: "Answer, and break sometimes." } }],
+    repeat: 2,
+  });
+
+  const brittle = report.arms[0]!;
+  assert.equal(brittle.runs.length, 2);
+  assert.equal(brittle.runs[0]?.status, "completed");
+  assert.equal(brittle.runs[1]?.status, "failed");
+  assert.equal(brittle.status, "completed", "the arm reads as the first of its cuts");
+  assert.equal(brittle.unstable, true, "how a cut ended is part of what it answered");
+  assert.equal(brittle.alike, 1);
+});
+
+test("an arm the runtime refuses is refused once, however many cuts were asked for", async (t) => {
+  const dir = tempDir(t);
+  const store = new RunStore(dir);
+  await record(store);
+
+  const report = await sweepForkPoint("baseline", {
+    provider,
+    tools,
+    store,
+    atStep: 2,
+    arms: [
+      { name: "too-late", overrides: { "step:2": "never read" } },
+      { name: "terse", agent: { system: "Answer in ten words." } },
+    ],
+    repeat: 3,
+  });
+
+  assert.equal(report.arms[0]?.status, "not_run");
+  assert.deepEqual(report.arms[0]?.runs, [], "nothing it was refused for reached the store");
+  assert.equal(report.arms[1]?.runs.length, 3);
+  // What `fork` refuses is read off the parent's log and the arm's own fields,
+  // which every cut of the arm shares — so putting it again would be three
+  // identical refusals rather than three draws.
+  assert.equal(
+    store.list().filter((id) => id.startsWith("sweep")).length,
+    3,
+    "three forks in the store: the arm that ran, and none for the arm that didn't",
+  );
+  assert.equal(report.control.arms, 1);
+  assert.equal(report.control.runs, 3);
+});
+
+test("repeat has to be a whole number of forks per arm", async () => {
+  const store = new MemoryStore();
+  await record(store);
+
+  for (const repeat of [0, -1, 1.5]) {
+    await assert.rejects(
+      () => sweepForkPoint("baseline", { provider, tools, store, atStep: 2, arms, repeat }),
+      /repeat has to be a whole number of forks per arm, at least 1/,
+      `repeat ${repeat} is not a number of forks`,
+    );
+  }
+});
+
+test("the CLI tallies the cuts of each arm and counts them all as controlled", async (t) => {
+  const dir = tempDir(t);
+  await record(new RunStore(dir));
+  const io = capture();
+
+  const code = await main(
+    ["sweep", "baseline", "--at", "2", "--dir", dir, "--module", MODULE, "--repeat", "3"],
+    io,
+  );
+
+  assert.equal(code, 0, "every arm settled, so there is nothing to report");
+  const text = io.text();
+  assert.match(text, /3 arms at step 2, off one replayed prefix, 3 times over each/);
+  assert.match(text, /terse\s+completed\s+3 of 3/);
+  assert.match(
+    text,
+    /controlled: 4 effects replayed identically by all 9 forks of the 3 arms, 1 of them a value an arm was told to substitute/,
+  );
+  assert.doesNotMatch(text, /unstable/);
+});
+
+test("the CLI names the arm that did not settle, says what else it said, and exits non-zero", async (t) => {
+  const dir = tempDir(t);
+  resetWobble();
+  await run("explain alpha and beta", {
+    agent,
+    provider: wobbleProvider,
+    tools: wobbleTools,
+    store: new RunStore(dir),
+    runId: "baseline",
+  });
+  resetWobble();
+  const io = capture();
+
+  const code = await main(
+    ["sweep", "baseline", "--at", "2", "--dir", dir, "--module", WOBBLE, "--repeat", "3"],
+    io,
+  );
+
+  assert.equal(code, 1);
+  const text = io.text();
+  assert.match(text, /steady\s+completed\s+3 of 3/);
+  assert.match(text, /wobbly\s+unstable\s+2 of 3/);
+  assert.match(text, /also: .*, or so they say/, "what it answered the other time");
+  assert.match(text, /unstable: "wobbly" answered more than one way at this fork point/);
+  assert.match(text, /a\s+difference between it and another arm is not something the arms account for/);
+  assert.match(text, /controlled: 4 effects replayed identically by all 6 forks of the 2 arms/);
 });
 
 function tempDir(t: TestContext): string {
