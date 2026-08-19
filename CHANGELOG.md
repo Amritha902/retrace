@@ -89,6 +89,23 @@ publish contains rather than what changed since something.
   value. A fork that did not complete is `inconclusive` rather than counted
   either way. `only` narrows it to one tool's calls, `instead` names the stand-in,
   and `maxForks` caps it and says which calls were left alone.
+- **A baseline behind every ablation verdict.** A tight cut still leaves a live
+  tail, and a live tail is a fresh sample of the model — so a trial answering
+  something other than the recorded answer meant either that the drop mattered or
+  that the run does not reach that answer twice from there, and nothing told them
+  apart. Each cut is now re-entered with nothing dropped, and a cut the run does
+  not reproduce from carries `unstable` instead of a verdict, because a trial
+  there is a difference between two draws rather than the effect of a drop. The
+  common cause is a tool whose corpus has moved under the calls the tail
+  re-executes, which used to surface as a call reported `needed` that nothing had
+  ever depended on. It is one extra fork per *cut* rather than per trial — the
+  calls recorded in a step share the fork made at the step after it — and each
+  trial names the baseline it was read against, so `diff` on the pair is the
+  drop's whole effect between two runs that share a parent, a fork point and a
+  live tail. The baselines are held to the prefix they replayed exactly as the
+  trials are, and are counted in what the command spent. `baseline: false`
+  (`--no-baseline`) skips the pass for half the price and the old, single-draw
+  reading. `retrace ablate` exits non-zero when a cut did not reproduce.
 - **`resume`.** A run killed partway through is carried on from its log: the
   whole prefix replays and execution goes live at the effect the log ends on, so
   a process that died at step 9 of 12 finishes for the price of three steps. It
@@ -431,9 +448,12 @@ not complete or the arms disagree below the fork point.
 `ablate <run-id> --module <path>` drops each recorded tool answer in turn,
 printing the call, what was taken away, the run it made and the answer it got
 without it, and closing on how many of the recorded answers the conclusion
-depends on and what the whole question cost against what it saved. `--instead
-<text>` is the stand-in, `--tool <name>` narrows it to one tool's calls,
-`--max-forks <n>` caps it, and it exits non-zero when a trial never answered.
+depends on and what the whole question cost against what it saved. Before the
+trials it re-enters each cut with nothing dropped and says whether the run
+reproduced from there. `--instead <text>` is the stand-in, `--tool <name>`
+narrows it to one tool's calls, `--max-forks <n>` caps it, `--no-baseline` skips
+the re-entries, and it exits non-zero when a trial never answered or was cut
+where the run does not reproduce itself.
 `--set <effect-key>=<value>`, on `fork` and `replay`, is the counterfactual.
 `stale <run-id>` reads the run against the one it replayed from and prints both
 sides of everything that moved under its free prefix.

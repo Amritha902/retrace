@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { ablateRun, DROPPED, type AblationControl, type AblationTrial } from "./ablate.ts";
+import {
+  ablateRun,
+  DROPPED,
+  type AblationBaseline,
+  type AblationControl,
+  type AblationReport,
+  type AblationTrial,
+} from "./ablate.ts";
 import { orderFacets } from "./agent.ts";
 import { collectBundle, importBundle, parseBundle, serializeBundle } from "./bundle.ts";
 import { compareRuns, type EffectPair, type RunComparison } from "./compare.ts";
@@ -89,6 +96,11 @@ Options
   --instead <text>          what ablate serves in place of a dropped answer
                             (default "${DROPPED}"). The counterfactual it asks
                             is "what if the call had said this"
+  --no-baseline             skip the fork ablate makes at each cut with nothing
+                            dropped. That fork is what says whether the run
+                            reproduces from there at all, so without it a trial
+                            cannot tell its drop from the model moving on its
+                            own — which is half the cost and the whole claim
   --repeat <n>              cut each of search's fork points n times instead of
                             once (default 1). A fork point holds only if every
                             fork made at it answers the same way, so a model
@@ -164,6 +176,7 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
   const downTo = readCount(takeOption(args, "--down-to"), "--down-to");
   const maxForks = readCount(takeOption(args, "--max-forks"), "--max-forks");
   const repeat = readCount(takeOption(args, "--repeat"), "--repeat");
+  const noBaseline = takeFlag(args, "--no-baseline");
   const allowIrreversible = takeFlag(args, "--allow-irreversible");
   const reentry: Reentry = { overrides, onDivergence, allowIrreversible };
 
@@ -198,7 +211,12 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
     case "sweep":
       return cmdSweep(io, store, rest[0], atRaw, modulePath, reentry);
     case "ablate":
-      return cmdAblate(io, store, rest[0], modulePath, reentry, { only, instead, maxForks });
+      return cmdAblate(io, store, rest[0], modulePath, reentry, {
+        only,
+        instead,
+        maxForks,
+        baseline: !noBaseline,
+      });
     case "resume":
       return cmdResume(io, store, rest[0], modulePath, reentry);
     case "stale":
@@ -1232,7 +1250,12 @@ async function cmdAblate(
   runId: string | undefined,
   modulePath: string | undefined,
   { onDivergence, allowIrreversible }: Reentry,
-  narrow: { only: readonly string[]; instead: string | undefined; maxForks: number | undefined },
+  narrow: {
+    only: readonly string[];
+    instead: string | undefined;
+    maxForks: number | undefined;
+    baseline: boolean;
+  },
 ): Promise<number> {
   if (!runId) return fail(io, "ablate needs a run id");
   if (modulePath === undefined) {
@@ -1256,32 +1279,82 @@ async function cmdAblate(
   }
 
   const width = Math.max(...calls.map((c) => c.key.length));
+  const baselines: AblationBaseline[] = [];
   const report = await ablateRun(runId, {
     provider: mod.provider ?? (await anthropic()),
     tools: mod.tools ?? [],
     budget: mod.budget,
     store,
+    baseline: narrow.baseline,
     ...(narrow.only.length > 0 ? { only: narrow.only } : {}),
     ...(narrow.instead === undefined ? {} : { instead: narrow.instead }),
     ...(narrow.maxForks === undefined ? {} : { maxForks: narrow.maxForks }),
     onDivergence: onDivergence ?? "strict",
     allowIrreversible,
-    onTrial: (trial) => printAblation(io, trial, width),
+    // The baselines all run before the first trial, since a trial's verdict is
+    // read against the one at its cut. Announcing them keeps the wait legible.
+    onBaseline: (made) => {
+      baselines.push(made);
+      io.out(dim(`  re-entered at step ${made.atStep} with nothing dropped\n`));
+    },
+    onTrial: (trial) => {
+      if (baselines.length > 0) {
+        io.out(`${ablationBaselineLine(baselines)}\n\n`);
+        baselines.length = 0;
+      }
+      printAblation(io, trial, width);
+    },
   });
 
   const tried = report.trials.length;
   io.out(
     `\n${report.needed} of ${plural(tried, "recorded answer")} this run's conclusion depends on\n`,
   );
+  if (report.unstable > 0) io.out(`${ablationDriftLine(report)}\n`);
   if (report.stopped !== undefined) io.out(dim(`${report.stopped}\n`));
   io.out(`${ablationControlLine(report.control, runId)}\n`);
   io.out(
     dim(
-      `${plural(report.control.forks, "fork")} · ${formatUsd(report.billedUsd)} billed · ` +
+      `${plural(report.control.forks + report.control.baselines, "fork")} · ` +
+        `${formatUsd(report.billedUsd)} billed · ` +
         `${formatUsd(report.savedUsd)} not spent again out of ${formatUsd(report.costUsd)}\n`,
     ),
   );
-  return report.control.ok && report.trials.every((t) => t.verdict !== "inconclusive") ? 0 : 1;
+  const answered = report.trials.every(
+    (t) => t.verdict !== "inconclusive" && t.verdict !== "unstable",
+  );
+  return report.control.ok && answered ? 0 : 1;
+}
+
+/**
+ * What the cuts did with nothing taken away — the line that says whether the
+ * verdicts below it are about the drops at all.
+ */
+function ablationBaselineLine(baselines: readonly AblationBaseline[]): string {
+  const held = baselines.filter((b) => b.reproduced).length;
+  if (held === baselines.length) {
+    return (
+      green("reproduced") +
+      `: ${plural(held, "fork")} re-entered the run at the same cuts with nothing ` +
+      `dropped, and ${held === 1 ? "it" : "all of them"} arrived at the recorded answer`
+    );
+  }
+  const moved = baselines.filter((b) => !b.reproduced).map((b) => `step ${b.atStep}`);
+  return (
+    yellow("did not reproduce") +
+    `: ${baselines.length - held} of ${plural(baselines.length, "fork")} made with nothing ` +
+    `dropped answered something else — ${moved.join(", ")}`
+  );
+}
+
+/** Why the trials at a cut that moved on its own are not findings. */
+function ablationDriftLine(report: AblationReport): string {
+  const moved = report.baselines.filter((b) => !b.reproduced);
+  return (
+    `${plural(report.unstable, "trial")} cut where the run does not reproduce itself ` +
+    `(${moved.map((b) => `step ${b.atStep}`).join(", ")}), so what ` +
+    `${report.unstable === 1 ? "it" : "they"} answered is not a fact about the dropped value`
+  );
 }
 
 function printAblation(io: Io, trial: AblationTrial, width: number): void {
@@ -1315,10 +1388,15 @@ function printAblation(io: Io, trial: AblationTrial, width: number): void {
 function ablationControlLine(control: AblationControl, runId: string): string {
   if (!control.ok) return `${red("not controlled")}: ${control.contradiction}`;
   if (control.forks === 0) return dim("no fork ran, so there was nothing to hold to a prefix");
+  const alongside =
+    control.baselines === 0
+      ? ""
+      : `, and ${plural(control.baselines, "baseline")} replayed the same prefixes whole ` +
+        `— ${plural(control.baselineClaimed, "effect")} more`;
   return (
     green("controlled") +
     `: each of ${plural(control.forks, "fork")} replayed ${runId}'s prefix unchanged ` +
-    `except the one value it dropped — ${plural(control.claimed, "effect")} in all`
+    `except the one value it dropped — ${plural(control.claimed, "effect")} in all${alongside}`
   );
 }
 

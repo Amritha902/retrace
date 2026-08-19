@@ -2,6 +2,7 @@ export {
   ablateRun,
   DROPPED,
   type Ablation,
+  type AblationBaseline,
   type AblationControl,
   type AblationOptions,
   type AblationReport,

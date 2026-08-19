@@ -21,8 +21,10 @@ import {
   type RunStore as Store,
 } from "../src/index.ts";
 import { provider, tools } from "./fixtures/ablate-module.ts";
+import { tools as movingTools } from "./fixtures/moving-module.ts";
 
 const MODULE = fileURLToPath(new URL("./fixtures/ablate-module.ts", import.meta.url));
+const MOVING_MODULE = fileURLToPath(new URL("./fixtures/moving-module.ts", import.meta.url));
 
 const agent = defineAgent({
   name: "researcher",
@@ -320,6 +322,228 @@ test("the effects a trial's log holds are its parent's, with the drop marked", a
   );
 });
 
+/**
+ * The same three lookups, from a corpus that answers a second execution
+ * differently.
+ *
+ * Nothing about the recorded run changes — each term is looked up once. What
+ * changes is what a *fork* sees: its live tail re-executes the calls above its
+ * cut, and gets the corpus as it is now. That is the ordinary way an ablation
+ * goes wrong, and the thing a single trial cannot see: the answer moves, and
+ * the value the trial dropped had nothing to do with it.
+ */
+function movingCorpus() {
+  const seen = new Set<string>();
+  return [
+    tool({
+      name: "lookup",
+      description: "Look a term up. Call this when you need a fact you don't have.",
+      inputSchema: objectSchema({ term: { type: "string" } }),
+      run: (input: { term: string }) => {
+        const again = seen.has(input.term);
+        seen.add(input.term);
+        return again ? `definition of ${input.term} (again)` : `definition of ${input.term}`;
+      },
+    }),
+  ];
+}
+
+test("each cut is re-entered with nothing dropped, and the trials say it reproduced", async () => {
+  const store = new MemoryStore();
+  await record(store);
+
+  const report = await ablateRun("baseline", { provider, tools, store });
+
+  // One per cut, in cut order — not one per trial. Every call recorded in a
+  // step is dropped from a fork at the step after it, so the cuts are what the
+  // trials share and one fork answers for all of them.
+  assert.deepEqual(
+    report.baselines.map((b) => b.atStep),
+    [1, 2, 3],
+  );
+  for (const made of report.baselines) {
+    assert.equal(made.status, "completed");
+    assert.equal(made.output, RECORDED_ANSWER);
+    assert.equal(made.reproduced, true, `step ${made.atStep} did not arrive where the run did`);
+  }
+  assert.equal(report.unstable, 0);
+});
+
+test("a trial names the baseline it was read against, and differs from it in one value", async () => {
+  const store = new MemoryStore();
+  await record(store);
+
+  const report = await ablateRun("baseline", { provider, tools, store });
+  const trial = report.trials[1]!;
+  const made = report.baselines.find((b) => b.atStep === trial.step + 1)!;
+
+  assert.equal(trial.baselineRunId, made.runId);
+
+  // The pair is the measurement: same parent, same cut, same live tail, and one
+  // substituted value between them. `diff` holds them to it as siblings, which
+  // is a check neither of them needs the run they came from to make.
+  const seen = compareRuns(trial.runId, made.runId, store as unknown as RunStore);
+  assert.equal(seen.ok, true);
+  assert.equal(seen.kinship.kind, "siblings");
+  assert.equal(seen.excused, 1, "the dropped value is the one place they are meant to differ");
+});
+
+test("a cut the run does not reproduce from carries no verdict about a drop", async () => {
+  const store = new MemoryStore();
+  const moving = movingCorpus();
+  await run("explain them", { agent, provider, tools: moving, store, runId: "baseline" });
+
+  const report = await ablateRun("baseline", { provider, tools: moving, store });
+
+  // Cutting at step 3 leaves a tail with no tool call in it, so that fork reads
+  // nothing and arrives where the run did. The two cuts below it re-execute a
+  // lookup, and the corpus has moved.
+  assert.deepEqual(
+    report.baselines.map((b) => [b.atStep, b.reproduced]),
+    [
+      [1, false],
+      [2, false],
+      [3, true],
+    ],
+  );
+  assert.deepEqual(
+    report.baselines.map((b) => b.output),
+    [
+      "definition of alpha + definition of gamma (again)",
+      "definition of alpha + definition of gamma (again)",
+      RECORDED_ANSWER,
+    ],
+  );
+
+  // Both trials below answered something other than the recorded answer, and a
+  // command without a baseline would have reported both of them `needed`. The
+  // middle one is the sharper half: dropping "beta" changed nothing, and the
+  // answer moved anyway.
+  assert.deepEqual(
+    report.trials.map((t) => t.verdict),
+    ["unstable", "unstable", "needed"],
+  );
+  assert.equal(report.trials[1]!.output, "definition of alpha + definition of gamma (again)");
+  assert.equal(report.unstable, 2);
+  assert.equal(report.needed, 1, "only the cut that reproduces can report a dependency");
+  assert.equal(report.spare, 0);
+});
+
+test("the baselines can be skipped, and then a trial is a single draw again", async () => {
+  const store = new MemoryStore();
+  const moving = movingCorpus();
+  await run("explain them", { agent, provider, tools: moving, store, runId: "baseline" });
+
+  const report = await ablateRun("baseline", { provider, tools: moving, store, baseline: false });
+
+  // The same three trials, and the verdict the recorded answer alone supports:
+  // two of them are the false `needed` the baselines above turned back.
+  assert.deepEqual(report.baselines, []);
+  assert.deepEqual(
+    report.trials.map((t) => t.verdict),
+    ["needed", "needed", "needed"],
+  );
+  assert.equal(report.trials[1]!.baselineRunId, undefined);
+  assert.equal(report.control.baselines, 0);
+  assert.equal(report.control.baselineClaimed, 0);
+});
+
+test("one baseline serves every call recorded in the same step", async () => {
+  const store = new MemoryStore();
+  // Step 0 asks for both lookups at once, so both drops cut at step 1.
+  const pair: typeof provider = {
+    name: "fixture",
+    async complete(request) {
+      const answered = request.messages.some((m) =>
+        m.role === "user" && m.content.some((b) => b.type === "tool_result"),
+      );
+      return {
+        model: request.model,
+        content: answered
+          ? [{ type: "text", text: "both" }]
+          : [
+              { type: "tool_use", id: "t0", name: "lookup", input: { term: "alpha" } },
+              { type: "tool_use", id: "t1", name: "lookup", input: { term: "beta" } },
+            ],
+        stopReason: answered ? "end_turn" : "tool_use",
+        usage: { inputTokens: 1000, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      };
+    },
+  };
+  await run("both", { agent, provider: pair, tools, store, runId: "baseline" });
+
+  const report = await ablateRun("baseline", { provider: pair, tools, store });
+
+  assert.deepEqual(
+    report.trials.map((t) => t.key),
+    ["step:0#0:lookup", "step:0#1:lookup"],
+  );
+  assert.equal(report.baselines.length, 1, "two drops, one cut, one fork to establish it");
+  assert.equal(report.baselines[0]!.atStep, 1);
+  assert.deepEqual(new Set(report.trials.map((t) => t.baselineRunId)), new Set([report.baselines[0]!.runId]));
+});
+
+test("the baselines are held to the prefix they replayed, and are paid for in the totals", async () => {
+  const store = new MemoryStore();
+  await record(store);
+
+  const report = await ablateRun("baseline", { provider, tools, store });
+
+  assert.equal(report.control.ok, true);
+  assert.equal(report.control.forks, 3, "the trials, which is what `excused` is about");
+  assert.equal(report.control.baselines, 3);
+  // A baseline cuts where its trials cut, so it replays exactly what they do —
+  // and substitutes nothing, so every position it replayed is owed unexcused.
+  assert.equal(report.control.baselineClaimed, report.control.claimed);
+  assert.equal(report.control.excused, 3);
+
+  const spent = [...report.trials, ...report.baselines];
+  assert.ok(
+    Math.abs(report.costUsd - spent.reduce((n, r) => n + r.costUsd, 0)) < 1e-9,
+    "the report's arithmetic covers every fork the command made, baselines included",
+  );
+  for (const made of report.baselines) assert.ok(made.savedUsd > 0, "a baseline replays a prefix too");
+});
+
+test("retrace ablate reports a cut that does not reproduce rather than a dependency", async (t: TestContext) => {
+  const { dir, store } = diskStore(t);
+  // The same module the CLI is about to load, so the corpus it moves under is
+  // the corpus this run recorded.
+  await run("explain them", { agent, provider, tools: movingTools, store, runId: "baseline" });
+
+  const io = capture();
+  const code = await main(["ablate", "baseline", "--dir", dir, "--module", MOVING_MODULE], io);
+  const text = plain(io.text);
+
+  assert.equal(code, 1, "a run that does not reproduce from its cuts is not a clean ablation");
+  assert.match(text, /did not reproduce: 2 of 3 forks made with nothing dropped answered something else — step 1, step 2/);
+  assert.match(text, /step:0#0:lookup\s+unstable/);
+  assert.match(text, /step:1#0:lookup\s+unstable/);
+  assert.match(text, /step:2#0:lookup\s+needed/);
+  assert.match(
+    text,
+    /2 trials cut where the run does not reproduce itself \(step 1, step 2\), so what they answered is not a fact about the dropped value/,
+  );
+});
+
+test("retrace ablate --no-baseline makes the drops and nothing else", async (t: TestContext) => {
+  const { dir, store } = diskStore(t);
+  await record(store);
+
+  const io = capture();
+  const code = await main(
+    ["ablate", "baseline", "--dir", dir, "--module", MODULE, "--no-baseline"],
+    io,
+  );
+  const text = plain(io.text);
+
+  assert.equal(code, 0, text);
+  assert.match(text, /2 of 3 recorded answers this run's conclusion depends on/);
+  assert.match(text, /3 forks · \$/);
+  assert.doesNotMatch(text, /re-entered at step/);
+  assert.doesNotMatch(text, /replayed the same prefixes whole/);
+});
+
 /** A disk-backed store, since the CLI reads runs by id from one. */
 function diskStore(t: TestContext): { dir: string; store: Store } {
   const dir = mkdtempSync(join(tmpdir(), "retrace-ablate-"));
@@ -361,7 +585,14 @@ test("retrace ablate prints each dropped answer, its verdict and its run", async
     text,
     /controlled: each of 3 forks replayed baseline's prefix unchanged except the one value it dropped — 12 effects in all/,
   );
-  assert.match(text, /3 forks · \$/);
+  assert.match(text, /and 3 baselines replayed the same prefixes whole — 12 effects more/);
+  assert.match(
+    text,
+    /reproduced: 3 forks re-entered the run at the same cuts with nothing dropped, and all of them arrived at the recorded answer/,
+  );
+  // Three drops and the three cuts they were made at, which is what the money
+  // line has to count if it is to be the price of the command.
+  assert.match(text, /6 forks · \$/);
 });
 
 test("retrace ablate takes the stand-in and the cap from the command line", async (t: TestContext) => {

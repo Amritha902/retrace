@@ -11,7 +11,12 @@ export type Ablation =
   /** The run answered the same thing anyway. */
   | "spare"
   /** The fork did not finish, so there is no answer to compare. */
-  | "inconclusive";
+  | "inconclusive"
+  /**
+   * The run does not arrive at the recorded answer from this cut even with
+   * nothing dropped, so what the trial answered is not a fact about the drop.
+   */
+  | "unstable";
 
 /** The value served in place of a dropped answer, unless the caller names another. */
 export const DROPPED = "(no result)";
@@ -32,6 +37,12 @@ export interface AblationTrial {
   error?: string;
   verdict: Ablation;
   /**
+   * The fork made at this trial's cut with nothing dropped, when one was made.
+   * `diff` on the two is the drop's effect with everything else held: they
+   * share a prefix, a fork point and a live tail, and differ in one value.
+   */
+  baselineRunId?: string;
+  /**
    * How many effects this fork replayed from the recorded run, and whether it
    * held them. The claim that makes one trial a counterfactual rather than a
    * second run: the same prefix, minus one value.
@@ -51,6 +62,46 @@ export interface AblationTrial {
 }
 
 /**
+ * The same cut with nothing dropped.
+ *
+ * A trial's live tail is a fresh sample of the model, so an answer that is not
+ * the recorded one differs for one of two reasons: the value that was taken
+ * away, or the model answering differently at that fork point on its own. One
+ * trial cannot tell those apart, and reading the second as the first is the
+ * wrong answer this command can give — a call reported `needed` that nothing
+ * ever depended on.
+ *
+ * A baseline asks the second question directly. Re-enter the run at the step
+ * the trials cut at, drop nothing, and see whether it still arrives where it
+ * did. If it does, the fork point reproduces and the trials there are measuring
+ * their drop. If it does not, nothing measured there is about a drop, and the
+ * trials say so rather than claiming a dependency.
+ *
+ * One is made per cut rather than per trial, because the cut is what the trials
+ * at a step have in common: every call recorded in step 3 is dropped from a fork
+ * at step 4, and one fork at step 4 answers for all of them.
+ */
+export interface AblationBaseline {
+  /** The cut the trials sharing this baseline all make. */
+  atStep: number;
+  runId: string;
+  status: RunStatus;
+  output: string;
+  error?: string;
+  /**
+   * Whether it arrived where the recorded run did. False is the finding: from
+   * this point the run does not reproduce itself, so a trial answering
+   * something else there has said nothing about the value it dropped.
+   */
+  reproduced: boolean;
+  /** Effects it replayed from the recorded run, none of them substituted. */
+  claimed: number;
+  costUsd: number;
+  billedUsd: number;
+  savedUsd: number;
+}
+
+/**
  * Whether the forks were counterfactuals, checked rather than assumed.
  *
  * Each one is held against the run it came from rather than against the others,
@@ -60,12 +111,19 @@ export interface AblationTrial {
  * and dropped different things.
  */
 export interface AblationControl {
-  /** How many forks were held to the run they came from. */
+  /** How many trial forks were held to the run they came from. */
   forks: number;
   /** Effects they replayed from it, over all of them. */
   claimed: number;
   /** Positions inside those a fork was told to drop: one apiece. */
   excused: number;
+  /**
+   * Baselines held the same way, and the effects they replayed. They cut where
+   * the trials cut and substitute nothing, so every position they replayed is
+   * owed to the run unexcused.
+   */
+  baselines: number;
+  baselineClaimed: number;
   /** Set when a fork's replayed prefix is not the prefix the run recorded. */
   contradiction?: string;
   ok: boolean;
@@ -87,9 +145,13 @@ export interface AblationReport {
   /** The stand-in each dropped answer was replaced with. */
   instead: string;
   trials: AblationTrial[];
+  /** One per cut the trials made, in cut order. Empty when they were skipped. */
+  baselines: AblationBaseline[];
   /** How many dropped answers moved the conclusion, and how many did not. */
   needed: number;
   spare: number;
+  /** Trials cut at a point the run does not reproduce from, so they measured nothing. */
+  unstable: number;
   control: AblationControl;
   /** Why it stopped short of the calls it had left, when it did. */
   stopped?: string;
@@ -105,10 +167,21 @@ export interface AblationOptions
   only?: readonly string[];
   /** What to serve in place of a dropped answer. `DROPPED` by default. */
   instead?: string;
-  /** Give up after this many forks, however many calls are left. */
+  /**
+   * Give up after this many drops, however many calls are left. Baselines are
+   * not counted against it — one is made per cut the trials it allows arrive at.
+   */
   maxForks?: number;
+  /**
+   * Re-run each cut with nothing dropped, to find out whether the run
+   * reproduces from there at all. On by default: without it a trial cannot say
+   * whether its answer moved because of the drop or because the model did.
+   */
+  baseline?: boolean;
   /** Called as each trial finishes, so a caller can print an ablation as it runs. */
   onTrial?: (trial: AblationTrial) => void;
+  /** Called as each baseline finishes, before any trial measured against it. */
+  onBaseline?: (baseline: AblationBaseline) => void;
 }
 
 /**
@@ -127,6 +200,11 @@ export interface AblationOptions
  * a trial's replayed prefix is not merely free, it is still answering the
  * questions it was recorded against — nothing below the drop goes `stale`, and
  * the substituted value is the whole of what separates the trial from the run.
+ *
+ * What that still leaves is a live tail, which is a fresh sample of the model.
+ * So each cut is also re-entered with nothing dropped, and a cut the run does
+ * not reproduce from carries no verdicts — see `AblationBaseline`. One baseline
+ * serves every trial cutting at the same step.
  *
  * The trials run one after another rather than at once, for the reason a sweep's
  * arms do: the tails execute tools, and this is not the place to introduce a
@@ -151,15 +229,51 @@ export async function ablateRun(
   let excused = 0;
   let stopped: string | undefined;
 
-  for (const [i, call] of calls.entries()) {
-    if (options.maxForks !== undefined && i >= options.maxForks) {
-      const left = calls.length - i;
-      stopped =
-        `capped at ${plural(options.maxForks, "fork")}: ${plural(left, "recorded call")} ` +
-        `${left === 1 ? "was" : "were"} not dropped`;
-      break;
-    }
+  const cap = options.maxForks;
+  const dropped = cap === undefined ? calls : calls.slice(0, cap);
+  if (cap !== undefined && dropped.length < calls.length) {
+    const left = calls.length - dropped.length;
+    stopped =
+      `capped at ${plural(cap, "fork")}: ${plural(left, "recorded call")} ` +
+      `${left === 1 ? "was" : "were"} not dropped`;
+  }
 
+  // Every trial cuts at the step after the call it drops, so the cuts a set of
+  // trials makes are far fewer than the trials: one baseline per cut answers
+  // for every call recorded in the step below it.
+  const baselines: AblationBaseline[] = [];
+  const byCut = new Map<number, AblationBaseline>();
+  if (options.baseline !== false) {
+    for (const atStep of [...new Set(dropped.map((c) => c.step + 1))].sort((a, b) => a - b)) {
+      const result = await fork(parentRunId, {
+        ...options,
+        atStep,
+        overrides: {},
+        store,
+        runId: newRunId("ablate"),
+      });
+      const held = compareEvents(parentRunId, events, result.runId, result.events);
+      contradiction ??= held.contradiction;
+
+      const made: AblationBaseline = {
+        atStep,
+        runId: result.runId,
+        status: result.status,
+        output: result.output,
+        ...(result.error === undefined ? {} : { error: result.error }),
+        reproduced: result.status === "completed" && result.output === parent.output,
+        claimed: held.claimed,
+        costUsd: result.totals.costUsd,
+        billedUsd: result.totals.billedUsd,
+        savedUsd: result.totals.savedUsd,
+      };
+      baselines.push(made);
+      byCut.set(atStep, made);
+      options.onBaseline?.(made);
+    }
+  }
+
+  for (const call of dropped) {
     const result = await fork(parentRunId, {
       ...options,
       // The step after the one the call is in: everything recorded up to and
@@ -174,6 +288,7 @@ export async function ablateRun(
     contradiction ??= held.contradiction;
     excused += held.excused;
 
+    const baseline = byCut.get(call.step + 1);
     const trial: AblationTrial = {
       step: call.step,
       key: call.key,
@@ -184,7 +299,8 @@ export async function ablateRun(
       status: result.status,
       output: result.output,
       ...(result.error === undefined ? {} : { error: result.error }),
-      verdict: verdictOf(result.status, result.output, parent.output),
+      verdict: verdictOf(result.status, result.output, parent.output, baseline),
+      ...(baseline === undefined ? {} : { baselineRunId: baseline.runId }),
       claimed: held.claimed,
       staleFacets: staleFacets(result.events),
       costUsd: result.totals.costUsd,
@@ -195,26 +311,34 @@ export async function ablateRun(
     options.onTrial?.(trial);
   }
 
-  const total = (of: (t: AblationTrial) => number) => trials.reduce((sum, t) => sum + of(t), 0);
+  const sum = (of: (r: { costUsd: number; billedUsd: number; savedUsd: number }) => number) =>
+    [...trials, ...baselines].reduce((n, r) => n + of(r), 0);
+  const claimedBy = (rs: readonly { claimed: number }[]) =>
+    rs.reduce((n, r) => n + r.claimed, 0);
+
   return {
     runId: parentRunId,
     agent: parent.agent,
     recorded: parent.output,
     instead,
     trials,
+    baselines,
     needed: trials.filter((t) => t.verdict === "needed").length,
     spare: trials.filter((t) => t.verdict === "spare").length,
+    unstable: trials.filter((t) => t.verdict === "unstable").length,
     control: {
       forks: trials.length,
-      claimed: total((t) => t.claimed),
+      claimed: claimedBy(trials),
       excused,
+      baselines: baselines.length,
+      baselineClaimed: claimedBy(baselines),
       ...(contradiction === undefined ? {} : { contradiction }),
       ok: contradiction === undefined,
     },
     ...(stopped === undefined ? {} : { stopped }),
-    costUsd: total((t) => t.costUsd),
-    billedUsd: total((t) => t.billedUsd),
-    savedUsd: total((t) => t.savedUsd),
+    costUsd: sum((r) => r.costUsd),
+    billedUsd: sum((r) => r.billedUsd),
+    savedUsd: sum((r) => r.savedUsd),
   };
 }
 
@@ -224,9 +348,20 @@ export async function ablateRun(
  * A fork that did not complete never gave an answer, so comparing its output
  * against the recorded one would read a budget or a step limit as a dependency —
  * exactly the way `search` refuses to call an unfinished fork a match.
+ *
+ * A cut the run does not reproduce from is the same refusal one step out. The
+ * comparison is against the recorded answer, and if the baseline could not
+ * arrive at it either, then a trial that missed it missed it for a reason this
+ * command cannot separate from the drop.
  */
-function verdictOf(status: RunStatus, output: string, recorded: string): Ablation {
+function verdictOf(
+  status: RunStatus,
+  output: string,
+  recorded: string,
+  baseline: AblationBaseline | undefined,
+): Ablation {
   if (status !== "completed") return "inconclusive";
+  if (baseline !== undefined && !baseline.reproduced) return "unstable";
   return output === recorded ? "spare" : "needed";
 }
 
